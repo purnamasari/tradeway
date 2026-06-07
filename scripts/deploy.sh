@@ -60,15 +60,21 @@ echo "  now at $COMMIT"
 echo "▶ pnpm install --frozen-lockfile"
 pnpm install --frozen-lockfile
 
-# ── 3. Database migrations (no-op if DATABASE_URL is unset) ────────────────────
+# ── 3. Schema sync (no-op if DATABASE_URL is unset) ───────────────────────────
+# Reconcile the live schema with src/db/schema.ts via drizzle-kit push — the same
+# workflow as local `pnpm db:push`. drizzle-kit auto-loads .env for the connection.
+# Additive changes apply automatically; we deliberately do NOT pass --force, so a
+# destructive (data-loss) change aborts the deploy instead of silently truncating
+# the bot's accumulated history — dropping/altering columns stays a manual step.
+# --verbose logs the statements applied so each deploy's schema changes are visible.
 if grep -qE '^DATABASE_URL=.+' .env 2>/dev/null; then
-  echo "▶ applying DB migrations (drizzle-kit migrate)"
-  pnpm exec drizzle-kit migrate || {
-    echo "✖ migration failed" >&2
+  echo "▶ syncing schema (drizzle-kit push)"
+  pnpm exec drizzle-kit push --verbose || {
+    echo "✖ schema push failed — if this was a destructive change, apply it manually" >&2
     exit 1
   }
 else
-  echo "▶ no DATABASE_URL — skipping migrations"
+  echo "▶ no DATABASE_URL — skipping schema sync"
 fi
 
 # ── 4. Reload under PM2 (zero-downtime) ───────────────────────────────────────
