@@ -107,10 +107,25 @@ Postgres) so tests are fully isolated and deterministic.
 - `.env` (optional, copy from `.env.example`) — enables enhancement layers:
   - `GEMINI_API_KEY` → AI trend classifier (else EMA/ADX fallback)
   - `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` → Telegram alerts (else console)
-  - `REDIS_URL` → shared cache (else in-process)
+  - `REDIS_URL` → shared cache **and BullMQ job scheduling** (else in-process cache + `setInterval` scheduler)
   - `DATABASE_URL` → Postgres persistence for metric history and signals (else disabled)
+  - `MARKET_FEED` → `ws` (default; streamed candles/ticker) or `rest` (per-scan polling)
 
 Everything degrades gracefully — a missing key just disables that layer.
+
+### Market feed & scheduling
+
+In loop mode the bot defaults to a **WebSocket feed**: it REST-seeds candle/funding/OI
+buffers once, then keeps them live via Bybit's public WS (`kline.1/15/240` + `tickers`),
+so each scan reads current data instantly instead of firing six REST calls. The feed
+auto-reconnects with backoff and re-seeds after a drop; its liveness shows up under
+`feed` in `/health`. Set `MARKET_FEED=rest` to fall back to per-scan REST polling.
+
+Recurring work (per-symbol scans, funding/OI poll, outcome eval, daily retention) runs
+through a **scheduler** that uses **BullMQ** when `REDIS_URL` is set — durable repeatable
+jobs that survive restarts, with concurrency and retries — or a dependency-free
+`setInterval` fallback otherwise. `/health` reports which backend is active via the boot
+log (`scheduler=bullmq|interval`).
 
 ### Telegram setup
 
@@ -267,7 +282,12 @@ drizzle.config.ts           Drizzle Kit config for schema management
 ## What's NOT in this MVP (next sprints)
 
 Deferred to later sprints:
-- **Bybit WebSocket Feed**: Currently using public REST polling for market and tick data.
-- **BullMQ Workers**: Background scan loops currently run inline via scheduling intervals.
 - **R2 Storage CDN**: Charts are sent directly as raw buffer attachments via Telegram bot API rather than stored on a CDN.
-- **Adaptive-threshold history accumulation**: Automated recalculation of regime/ATR/OI thresholds based on accumulated historical database distributions.
+- **Squeeze two-phase WS trigger**: The squeeze detector runs per scan rather than arming a pre-condition and confirming on a WebSocket tick.
+- **Prev Day/Week H/L S/R source** and **expected-path chart overlay** (calculated per strategy).
+
+Recently landed (post-MVP):
+- **Bybit WebSocket feed** — streamed candles/ticker with REST seeding + reconnect (`MARKET_FEED=ws`).
+- **BullMQ scheduler** — durable repeatable jobs when `REDIS_URL` is set, `setInterval` fallback otherwise.
+- **Adaptive-threshold history accumulation** — historical backfill into `market_history`.
+- **CI/CD, health checks, and monitoring** — see [Deployment](#deployment-vps--pm2--cicd).

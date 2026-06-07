@@ -115,6 +115,8 @@ export interface Env {
   healthHost: string;
   /** Send startup/shutdown/crash alerts via the notifier (default: on). */
   opsAlerts: boolean;
+  /** Market data source in loop mode: "ws" (streamed) or "rest" (per-scan polling). */
+  marketFeed: "ws" | "rest";
 }
 
 export function loadEnv(): Env {
@@ -128,5 +130,6 @@ export function loadEnv(): Env {
     healthPort: process.env.HEALTH_PORT ? Number(process.env.HEALTH_PORT) : 3000,
     healthHost: process.env.HEALTH_HOST || "127.0.0.1",
     opsAlerts: process.env.OPS_ALERTS !== "false",
+    marketFeed: process.env.MARKET_FEED === "rest" ? "rest" : "ws",
   };
 }
