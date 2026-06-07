@@ -22,7 +22,8 @@ Bybit market data ──▶ Regime Engine ──▶ AI Trend Classifier ──�
                                          ▼                    ▼
                               Strategy Detectors ──▶  Scoring  ──▶  Gates  ──▶  Alert
                               (liquidity_sweep,      (confidence +    (conf/quality/    (Telegram
-                               trend_pullback)        setup_quality)   RR/cooldown)       or console)
+                               trend_pullback,        setup_quality)   RR/cooldown)       or console)
+                               squeeze)
 ```
 
 Two components answer **different** questions and never override each other:
@@ -31,6 +32,8 @@ Two components answer **different** questions and never override each other:
 |-----------|----------|-----|
 | **Regime Engine** | "What strategy fits current conditions?" | Pure math (ADX, ATR percentile, EMA spread). No AI. |
 | **AI Trend Classifier** | "Which way is 4H momentum going?" | Gemini 2.5 Flash → Flash-Lite → EMA/ADX rule fallback. |
+| **S/R Engine** | "Where are key horizontal support/resistance levels?" | Swing pivots, clustered, strength scored. |
+| **Outcome Evaluator** | "Did active signals hit entry, TP, SL, or expire?" | 1-minute polling of ticker price against active outcomes in DB. |
 
 A signal needs both to agree (e.g. `regime=ranging` **AND** `trend=bullish` →
 `liquidity_sweep LONG` permitted).
@@ -41,6 +44,7 @@ A signal needs both to agree (e.g. `regime=ranging` **AND** `trend=bullish` →
 |----------|-------------|---------|
 | **liquidity_sweep** | `ranging` | Wick sweeps S/R level, then reclaims (bounce) |
 | **trend_pullback** | `trending` | Price pulls back to S/R, then bounces in trend direction |
+| **squeeze** | `high_volatility` | Extreme funding (percentile) + open interest shift |
 
 When multiple detectors fire, the scanner selects the signal with the highest
 **combined score** (`confidence × 0.6 + setup_quality × 0.4`).
@@ -66,11 +70,17 @@ pnpm scan:once -- --mock
 # Mock: pullback scenario (trending regime + trend_pullback detector)
 pnpm scan:once -- --mock --mock-scenario=pullback
 
+# Mock: squeeze scenario (high_volatility regime + squeeze detector)
+pnpm scan:once -- --mock --mock-scenario=squeeze
+
 # Continuous loop — per-asset interval from watchlist.yaml
 pnpm scan
 
 # Verbose decision logging
 LOG_LEVEL=debug pnpm scan:once
+
+# Test chart rendering (generates test-chart.png using mock sweep scenario)
+pnpm test:chart
 ```
 
 `--mock` generates synthetic candles crafted to land in a ranging regime with a
@@ -80,6 +90,9 @@ without waiting for live conditions to line up.
 
 `--mock --mock-scenario=pullback` generates a trending regime with a bullish
 4H trend and a pullback-to-support pattern — producing a `trend_pullback LONG`.
+
+`--mock --mock-scenario=squeeze` generates a high-volatility regime with a bullish/bearish
+4H trend and extreme funding/OI deviations — producing a `squeeze LONG/SHORT`.
 
 Mock mode automatically disables external services (Gemini, Telegram, Redis,
 Postgres) so tests are fully isolated and deterministic.
@@ -137,7 +150,7 @@ Everything degrades gracefully — a missing key just disables that layer.
    pnpm db:push
    ```
 
-   Tables created: `metric_history`, `signals`, `regime_log`.
+   Tables created: `metric_history`, `signals`, `regime_log`, `signal_outcomes`.
 
 ## Layout
 
@@ -152,20 +165,28 @@ src/
   scoring.ts                confidence + setup_quality
   notify.ts                 Telegram/console + explainability formatter
   types.ts                  shared domain types
+  chart/
+    renderer.ts             Puppeteer-core + system Chrome + Lightweight Charts PNG generator
+    template.html           self-contained HTML/JS charting template
   data/
     bybit.ts                public v5 REST: klines, ticker, funding, OI
     market.ts               assembles per-symbol MarketContext
     mock.ts                 deterministic offline data (sweep + pullback scenarios)
   db/
-    schema.ts               Drizzle schema: metric_history, signals, regime_log
+    schema.ts               Drizzle schema: metric_history, signals, regime_log, signal_outcomes
     index.ts                Postgres client (graceful degradation)
-    accumulate.ts           recordMetrics, recordSignal, recordRegime
+    accumulate.ts           recordMetrics, recordSignal, recordRegime, outcomes & retention
+  outcome/
+    outcome-tracker.ts      evaluates open outcomes against live tickers every minute
   regime/engine.ts          rule-based regime classifier
   ai/trend-classifier.ts    3-tier trend classifier (Gemini → fallback)
   strategy/
     sr-engine.ts            swing pivots → clustering → strength scoring
     liquidity-sweep.ts      sweep+reclaim detector
     trend-pullback.ts       pullback-to-S/R + bounce detector
+    squeeze.ts              extreme funding + OI changes in high-volatility regime detector
+  test-chart.ts             quick test script to generate a mock chart to disk
+  test-telegram.ts          quick Telegram connectivity test script
 config/
   watchlist.yaml            symbols, scan intervals, asset classes
   rules.yaml                thresholds, weights, retention policy
@@ -174,8 +195,8 @@ drizzle.config.ts           Drizzle Kit config for schema management
 
 ## What's NOT in this MVP (next sprints)
 
-Per the blueprint, deferred to later sprints: `squeeze` detector (needs metric
-history accumulation first), Bybit WebSocket (currently REST polling), BullMQ
-workers, chart rendering + R2 upload, retention cleanup job, and adaptive-threshold
-history accumulation. The architecture has seams for all of them (pluggable data
-provider, cache abstraction, per-strategy detectors).
+Deferred to later sprints:
+- **Bybit WebSocket Feed**: Currently using public REST polling for market and tick data.
+- **BullMQ Workers**: Background scan loops currently run inline via scheduling intervals.
+- **R2 Storage CDN**: Charts are sent directly as raw buffer attachments via Telegram bot API rather than stored on a CDN.
+- **Adaptive-threshold history accumulation**: Automated recalculation of regime/ATR/OI thresholds based on accumulated historical database distributions.
