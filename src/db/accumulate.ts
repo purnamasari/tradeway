@@ -2,13 +2,13 @@
 // building percentile/z-score windows over time.
 // Also handles signal outcome persistence.
 import type { Db } from "./index.js";
-import type { MarketContext, RegimeResult, TrendResult, Signal, StrategyKind } from "../types.js";
+import type { Candle, MarketContext, RegimeResult, TrendResult, Signal, StrategyKind } from "../types.js";
 import type { Rules } from "../config.js";
 import { ENTRY_TTL } from "../types.js";
-import { metricHistory, signals as signalsTable, regimeLog, signalOutcomes } from "./schema.js";
-import { atr, adx, ema } from "../indicators.js";
+import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes } from "./schema.js";
+import { atr, adx, ema, atrSeries } from "../indicators.js";
 import { logger } from "../logger.js";
-import { desc, eq, gte, lt, and, sql, inArray } from "drizzle-orm";
+import { asc, desc, eq, gte, lt, and, sql, inArray, isNotNull } from "drizzle-orm";
 
 
 /**
@@ -288,6 +288,127 @@ export async function fetchHistoricalMetricsFromDb(
   } catch (err) {
     logger.warn(`[db] fetchHistoricalMetricsFromDb failed for ${symbol}: ${(err as Error).message}`);
     return null;
+  }
+}
+
+// ── Historical context from market_history (backfilled raw data) ─────────────
+
+export interface MarketHistoryOptions {
+  fundingDays: number;
+  oiDays: number;
+  /** Recent window (days) of candles used for ATR & volume percentiles. May be
+   *  shorter than the full stored candle history (backfill.candle_days). */
+  candleDays: number;
+  atrPeriod: number;
+}
+
+/**
+ * Build percentile/z-score windows from the backfilled raw market_history.
+ * ATR and volume are derived from the raw candles on demand (never stored), so
+ * indicator-formula changes never require a re-backfill.
+ */
+export async function fetchHistoricalContextFromMarketHistory(
+  db: Db,
+  symbol: string,
+  opts: MarketHistoryOptions,
+): Promise<HistoricalMetrics | null> {
+  if (!db) return null;
+  try {
+    const now = Date.now();
+    const maxDays = Math.max(opts.fundingDays, opts.oiDays, opts.candleDays);
+    const since = new Date(now - maxDays * 24 * 60 * 60 * 1000);
+
+    const rows = await db
+      .select({
+        timestamp: marketHistory.timestamp,
+        open: marketHistory.open,
+        high: marketHistory.high,
+        low: marketHistory.low,
+        close: marketHistory.close,
+        volume: marketHistory.volume,
+        open_interest: marketHistory.open_interest,
+        funding_rate: marketHistory.funding_rate,
+      })
+      .from(marketHistory)
+      .where(and(eq(marketHistory.symbol, symbol), gte(marketHistory.timestamp, since)))
+      .orderBy(asc(marketHistory.timestamp));
+
+    if (rows.length === 0) {
+      return { fundingHistory: [], oiHistory: [], atrHistory: [], volumeHistory: [], recordCount: 0 };
+    }
+
+    const fundingCutoff = now - opts.fundingDays * 24 * 60 * 60 * 1000;
+    const oiCutoff = now - opts.oiDays * 24 * 60 * 60 * 1000;
+    const candleCutoff = now - opts.candleDays * 24 * 60 * 60 * 1000;
+
+    const fundingHistory: number[] = [];
+    const oiHistory: number[] = [];
+    const volumeHistory: number[] = [];
+    const candles: Candle[] = [];
+
+    for (const r of rows) {
+      const t = new Date(r.timestamp).getTime();
+      if (r.funding_rate !== null && Number.isFinite(r.funding_rate) && t >= fundingCutoff) {
+        fundingHistory.push(r.funding_rate);
+      }
+      if (r.open_interest !== null && Number.isFinite(r.open_interest) && t >= oiCutoff) {
+        oiHistory.push(r.open_interest);
+      }
+      if (
+        t >= candleCutoff &&
+        r.open !== null && r.high !== null && r.low !== null && r.close !== null
+      ) {
+        candles.push({
+          time: Math.floor(t / 1000),
+          open: r.open,
+          high: r.high,
+          low: r.low,
+          close: r.close,
+          volume: r.volume ?? 0,
+        });
+        if (r.volume !== null && Number.isFinite(r.volume)) volumeHistory.push(r.volume);
+      }
+    }
+
+    // ATR is computed from the raw candles, oldest-first (already sorted asc).
+    const atrHistory = atrSeries(candles, opts.atrPeriod).filter((v) => Number.isFinite(v));
+
+    return {
+      fundingHistory,
+      oiHistory,
+      atrHistory,
+      volumeHistory,
+      recordCount: candles.length,
+    };
+  } catch (err) {
+    logger.warn(`[db] fetchHistoricalContextFromMarketHistory failed for ${symbol}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+export type MarketHistoryColumn = "open" | "open_interest" | "funding_rate";
+
+/** Earliest/latest stored timestamps (unix ms) for a column, for gap-aware incremental backfill. */
+export async function marketHistoryBounds(
+  db: Db,
+  symbol: string,
+  column: MarketHistoryColumn,
+): Promise<{ earliest: number | null; latest: number | null }> {
+  if (!db) return { earliest: null, latest: null };
+  try {
+    const col = marketHistory[column];
+    const rows = await db
+      .select({ min: sql<string | null>`min(${marketHistory.timestamp})`, max: sql<string | null>`max(${marketHistory.timestamp})` })
+      .from(marketHistory)
+      .where(and(eq(marketHistory.symbol, symbol), isNotNull(col)));
+    const r = rows[0];
+    return {
+      earliest: r?.min ? new Date(r.min).getTime() : null,
+      latest: r?.max ? new Date(r.max).getTime() : null,
+    };
+  } catch (err) {
+    logger.warn(`[db] marketHistoryBounds failed for ${symbol}/${column}: ${(err as Error).message}`);
+    return { earliest: null, latest: null };
   }
 }
 

@@ -70,6 +70,17 @@ export interface Rules {
     metric_history_days: number;
     regime_log_days: number;
   };
+  backfill: {
+    funding_days: number;
+    oi_days: number;
+    candle_days: number; // 15m candle storage window
+    percentile_days: number; // recent window for ATR/volume percentiles at scan time
+    oi_interval: string; // Bybit intervalTime: 5min|15min|30min|1h|4h|1d
+    min_funding: number;
+    min_oi: number;
+    min_volume: number;
+    min_candles: number;
+  };
 }
 
 function load<T>(file: string): T {
@@ -98,6 +109,12 @@ export interface Env {
   redisUrl?: string;
   databaseUrl?: string;
   bybitCategory: string;
+  /** Health endpoint port. Set to 0/empty to disable the health server. */
+  healthPort: number;
+  /** Health endpoint bind address. Defaults to loopback (proxy/tunnel to expose). */
+  healthHost: string;
+  /** Send startup/shutdown/crash alerts via the notifier (default: on). */
+  opsAlerts: boolean;
 }
 
 export function loadEnv(): Env {
@@ -108,5 +125,8 @@ export function loadEnv(): Env {
     redisUrl: process.env.REDIS_URL || undefined,
     databaseUrl: process.env.DATABASE_URL || undefined,
     bybitCategory: process.env.BYBIT_CATEGORY || "linear",
+    healthPort: process.env.HEALTH_PORT ? Number(process.env.HEALTH_PORT) : 3000,
+    healthHost: process.env.HEALTH_HOST || "127.0.0.1",
+    opsAlerts: process.env.OPS_ALERTS !== "false",
   };
 }

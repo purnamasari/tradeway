@@ -15,6 +15,13 @@
       "when": 1780808665473,
       "tag": "0001_secret_quicksilver",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780822548049,
+      "tag": "0002_youthful_iron_monger",
+      "breakpoints": true
     }
   ]
 }

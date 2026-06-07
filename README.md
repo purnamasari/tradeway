@@ -152,6 +152,77 @@ Everything degrades gracefully — a missing key just disables that layer.
 
    Tables created: `metric_history`, `signals`, `regime_log`, `signal_outcomes`.
 
+## Deployment (VPS + PM2 + CI/CD)
+
+The bot runs on a VPS under [PM2](https://pm2.keymetrics.io/) straight from
+TypeScript source via `tsx` (no build step). Pushing to `main` triggers a GitHub
+Actions pipeline that SSHes in, pulls, installs, migrates, and reloads with a
+health gate.
+
+### One-time VPS setup
+
+```bash
+# Node 22 + pnpm + pm2 installed, then:
+git clone https://github.com/purnamasari/tradeway.git tradeaway
+cd tradeaway
+cp .env.example .env        # fill in secrets
+pnpm install --frozen-lockfile
+pnpm db:migrate             # if DATABASE_URL is set
+
+pm2 start ecosystem.config.cjs
+pm2 save                    # persist the process list
+pm2 startup                 # print the command to enable PM2 on boot, then run it
+```
+
+### Continuous deployment
+
+`.github/workflows/deploy.yml` runs on every push to `main`: it typechecks, then
+SSHes into the VPS and runs `scripts/deploy.sh` (`git reset --hard origin/main` →
+`pnpm install` → `drizzle-kit migrate` → `pm2 reload` → verify `/health`). A red
+health check fails the deploy.
+
+Add these repository secrets (**Settings → Secrets and variables → Actions**):
+
+| Secret | Description |
+|--------|-------------|
+| `VPS_HOST` | Server IP or hostname |
+| `VPS_USER` | SSH user that owns the app dir |
+| `VPS_SSH_KEY` | Private key (the matching public key is in the server's `~/.ssh/authorized_keys`) |
+| `VPS_APP_DIR` | Absolute path to the checkout, e.g. `/home/deploy/tradeaway` |
+| `VPS_PORT` | SSH port (optional, defaults to `22`) |
+
+You can also trigger a deploy manually from the **Actions** tab (`workflow_dispatch`).
+To deploy by hand on the box: `./scripts/deploy.sh`.
+
+### Health check
+
+In loop mode the bot serves `GET /health` (default `127.0.0.1:3000`, configurable
+via `HEALTH_PORT`/`HEALTH_HOST`). It reports `200` when healthy and `503` once any
+symbol's scans go stale — so it catches "process up but wedged", which PM2 alone
+cannot. Body includes per-symbol last-success/error, dependency status, uptime,
+memory, version, and the deployed git commit:
+
+```bash
+curl -s localhost:3000/health | jq
+```
+
+Bound to loopback by default — expose it through a reverse proxy or SSH tunnel for
+an external uptime monitor (UptimeRobot, BetterStack, etc.).
+
+### Monitoring
+
+- **PM2** — process supervision: auto-restart with crash-loop backoff,
+  `max_memory_restart`, log capture. `pm2 status`, `pm2 logs tradeaway`,
+  `pm2 monit`. Install `pm2-logrotate` to cap log growth.
+- **Ops alerts** — startup, shutdown, and crash (`uncaughtException` /
+  `unhandledRejection`) notifications go to Telegram when configured, else the
+  console. Toggle with `OPS_ALERTS`.
+- **Cron probe** — `scripts/healthcheck.sh` polls `/health` and, on failure,
+  restarts via PM2 and alerts Telegram. Add to crontab:
+  ```cron
+  */5 * * * * /path/to/tradeaway/scripts/healthcheck.sh >> /path/to/tradeaway/logs/healthcheck.log 2>&1
+  ```
+
 ## Layout
 
 ```
