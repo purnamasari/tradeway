@@ -96,6 +96,12 @@ export interface Notifier {
     hitPrice: number | null,
     closedAt: Date,
   ): Promise<void>;
+  /**
+   * Operational/monitoring message (startup, shutdown, crash) — not a trading
+   * signal. Never throws: a failure to deliver an ops alert must not take down
+   * the process it is trying to report on.
+   */
+  sendOps(text: string): Promise<void>;
 }
 
 class ConsoleNotifier implements Notifier {
@@ -117,6 +123,10 @@ class ConsoleNotifier implements Notifier {
     console.log("\n" + "─".repeat(48));
     console.log(formatOutcome(outcome, status, hitPrice, closedAt));
     console.log("─".repeat(48) + "\n");
+  }
+
+  async sendOps(text: string): Promise<void> {
+    logger.info(`[ops] ${text}`);
   }
 }
 
@@ -155,6 +165,16 @@ class TelegramNotifier implements Notifier {
     const text = formatOutcome(outcome, status, hitPrice, closedAt);
     await this.bot.api.sendMessage(this.chatId, text);
     logger.info(`[notify] Sent outcome ${status} for ${outcome.symbol} to Telegram`);
+  }
+
+  async sendOps(text: string): Promise<void> {
+    // Best-effort: ops alerts must never throw into the caller (often a crash
+    // handler that is already mid-shutdown).
+    try {
+      await this.bot.api.sendMessage(this.chatId, text);
+    } catch (err) {
+      logger.warn(`[ops] Telegram ops alert failed: ${(err as Error).message}`);
+    }
   }
 }
 

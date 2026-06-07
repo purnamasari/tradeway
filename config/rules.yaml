@@ -41,3 +41,17 @@ squeeze:
   oi_zscore_min: 1.0
   oi_zscore_max: -1.0
 
+# One-time historical backfill from Bybit. Bootstraps percentile/z-score windows
+# so adaptive thresholds are meaningful immediately after deploy.
+backfill:
+  funding_days: 90        # funding-rate history window
+  oi_days: 90             # open-interest history window
+  candle_days: 30         # 15m candle window (for ATR/volume percentiles)
+  oi_interval: "1h"       # Bybit intervalTime for OI snapshots
+  # Minimum samples below which a symbol is considered to lack historical context
+  # and is (re)backfilled at startup.
+  min_funding: 50
+  min_oi: 30
+  min_volume: 50
+  min_candles: 50
+

@@ -9,10 +9,27 @@ import { scanSymbol, type ScannerDeps, type ContextProvider } from "./scanner.js
 import { buildMarketContext } from "./data/market.js";
 import { buildMockContext } from "./data/mock.js";
 import { runRetentionCleanup } from "./db/accumulate.js";
+import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
 import { fetchTicker } from "./data/bybit.js";
 import { logger } from "./logger.js";
+import { startHealthServer } from "./health.js";
+import { readFileSync } from "node:fs";
 import type { MockScenario } from "./types.js";
+
+// Build metadata for the health endpoint. Version comes from package.json; the
+// git commit is injected by the deploy script (scripts/deploy.sh) so /health can
+// report exactly which revision is live.
+function buildInfo(): { version: string; commit: string } {
+  let version = "unknown";
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    version = pkg.version ?? "unknown";
+  } catch {
+    // ignore — version is best-effort
+  }
+  return { version, commit: process.env.GIT_COMMIT || "unknown" };
+}
 
 // Load .env if present (Node 22 builtin; no dependency).
 try {
@@ -35,6 +52,7 @@ function parseMockScenario(): MockScenario {
 async function main() {
   const once = process.argv.includes("--once");
   const mock = process.argv.includes("--mock");
+  const backfillOnly = process.argv.includes("--backfill");
   const mockScenario = mock ? parseMockScenario() : "sweep";
   const watchlist = loadWatchlist();
   const rules = loadRules();
@@ -53,6 +71,24 @@ async function main() {
   const cache = await createCache(env.redisUrl);
   const db = await createDb(env.databaseUrl);
   const notifier = await createNotifier(env);
+
+  const backfillSymbols = watchlist.assets.filter((a) => a.enabled).map((a) => a.symbol);
+
+  // ── Manual one-time backfill (`--backfill`): force a full run, then exit. ──
+  if (backfillOnly) {
+    if (!db) {
+      logger.error("[boot] --backfill requires DATABASE_URL");
+      process.exit(1);
+    }
+    logger.info(`[boot] historical backfill · ${backfillSymbols.length} symbols · category=${env.bybitCategory}`);
+    await runHistoricalBackfill(db, env.bybitCategory, backfillSymbols, rules);
+    return;
+  }
+
+  // ── Startup bootstrap: backfill symbols that lack sufficient history. ──────
+  if (db && !mock) {
+    await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
+  }
 
   if (db && !mock) {
     void runRetentionCleanup(db, rules);
@@ -82,6 +118,53 @@ async function main() {
     logger.info("[boot] Single pass complete");
     return;
   }
+
+  // ── Health server ───────────────────────────────────────────────────────────
+  // Loop mode only: exposes /health for PM2-external monitoring, the CD health
+  // gate, and cron checks. Staleness is judged against the longest scan interval.
+  const maxIntervalMs = Math.max(...enabled.map((a) => a.scan_interval)) * 60_000;
+  const info = buildInfo();
+  if (env.healthPort > 0) {
+    startHealthServer(
+      {
+        version: info.version,
+        commit: info.commit,
+        symbols: enabled.map((a) => a.symbol),
+        maxIntervalMs,
+        db: Boolean(env.databaseUrl),
+        redis: Boolean(env.redisUrl),
+        telegram: Boolean(env.telegramBotToken),
+        ai: Boolean(env.geminiApiKey),
+      },
+      env.healthPort,
+      env.healthHost,
+    );
+  }
+
+  // ── Crash & shutdown monitoring ───────────────────────────────────────────────
+  // A long-running worker should report when it dies so a stuck/looping restart is
+  // visible. We notify, then exit non-zero and let PM2 restart us — alerting but
+  // not swallowing the fault.
+  if (env.opsAlerts) {
+    void notifier.sendOps(
+      `🟢 tradeaway started · ${enabled.length} symbols · v${info.version} (${info.commit}) · ` +
+        `AI=${env.geminiApiKey ? "gemini" : "rule"} db=${env.databaseUrl ? "on" : "off"}`,
+    );
+  }
+  const onFatal = (label: string) => (err: unknown) => {
+    const msg = err instanceof Error ? err.stack || err.message : String(err);
+    logger.error(`[boot] ${label}: ${msg}`);
+    const done = () => process.exit(1);
+    if (env.opsAlerts) {
+      void notifier.sendOps(`🔴 tradeaway ${label} — restarting\n${(err as Error)?.message ?? err}`).finally(done);
+      // Don't hang forever if the alert stalls.
+      setTimeout(done, 3000).unref();
+    } else {
+      done();
+    }
+  };
+  process.on("uncaughtException", onFatal("uncaughtException"));
+  process.on("unhandledRejection", onFatal("unhandledRejection"));
 
   // Per-asset interval loop with startup jitter so symbols don't fire together.
   for (const asset of enabled) {
@@ -116,10 +199,18 @@ async function main() {
     logger.info("[boot] outcome tracker: every 60s");
   }
 
-  process.on("SIGINT", () => {
-    logger.info("[boot] shutting down");
-    process.exit(0);
-  });
+  const shutdown = (signal: string) => {
+    logger.info(`[boot] ${signal} — shutting down`);
+    const done = () => process.exit(0);
+    if (env.opsAlerts) {
+      void notifier.sendOps(`🟡 tradeaway stopping (${signal})`).finally(done);
+      setTimeout(done, 3000).unref();
+    } else {
+      done();
+    }
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 main().catch((err) => {

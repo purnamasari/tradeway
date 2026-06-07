@@ -1,0 +1,50 @@
+name: Deploy
+
+# CI/CD for the VPS. On every push to main: gate on typecheck, then SSH in and run
+# the idempotent deploy (git pull → install → migrate → pm2 reload → health gate).
+# Concurrency guard cancels superseded runs so two pushes can't deploy at once.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # allow manual "Run workflow" deploys from the Actions tab
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          # Fail the step if any command fails. The action runs a non-login shell,
+          # so source the user's profile to put pnpm/pm2/node (nvm, volta, corepack)
+          # on PATH the same way an interactive SSH session would.
+          script_stop: true
+          script: |
+            set -e
+            [ -f "$HOME/.profile" ] && . "$HOME/.profile" || true
+            [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" || true
+            cd "${{ secrets.VPS_APP_DIR }}"
+            chmod +x scripts/deploy.sh scripts/healthcheck.sh
+            ./scripts/deploy.sh

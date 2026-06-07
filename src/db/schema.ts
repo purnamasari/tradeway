@@ -1,6 +1,35 @@
 // Drizzle schema — metric_history, signals, regime_log, signal_outcomes tables.
 // All persistence is optional; if DATABASE_URL is not set, these are never used.
-import { pgTable, serial, text, real, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, real, timestamp, jsonb, integer, index, uniqueIndex } from "drizzle-orm/pg-core";
+
+// ── market_history ────────────────────────────────────────────────────────────
+// Raw historical market data backfilled from Bybit (and the single source of
+// truth for percentile/z-score windows). One row per (symbol, timestamp).
+//
+// Rows are sparse by design: candle backfill populates OHLCV, OI backfill
+// populates open_interest, funding backfill populates funding_rate. When the
+// timestamps coincide (e.g. on an hour boundary) the backfillers merge into the
+// same row via upsert. Derived indicators (ATR, volatility) are NOT stored —
+// they are computed on demand from the raw candles so formula changes never
+// require a re-backfill.
+export const marketHistory = pgTable(
+  "market_history",
+  {
+    id: serial("id").primaryKey(),
+    symbol: text("symbol").notNull(),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    open: real("open"),
+    high: real("high"),
+    low: real("low"),
+    close: real("close"),
+    volume: real("volume"),
+    open_interest: real("open_interest"),
+    funding_rate: real("funding_rate"),
+  },
+  (t) => [
+    uniqueIndex("uq_market_symbol_time").on(t.symbol, t.timestamp),
+  ],
+);
 
 // ── metric_history ──────────────────────────────────────────────────────────
 // One row per symbol per scan. Accumulates the raw data needed for percentile
