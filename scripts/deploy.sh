@@ -87,16 +87,22 @@ pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 
 # ── 5. Health gate ────────────────────────────────────────────────────────────
+# Poll for up to ~100 s (20 × 5 s). This covers:
+#   - the kill_timeout window (8 s) where the old process holds the port
+#   - health-server port-retry backoff (up to 12 s, see src/health.ts)
+#   - DB history bootstrap on the first deploy after a schema change
+# --retry-connrefused makes curl keep polling even while the port is still closed
+# (connection refused), rather than exiting non-zero immediately.
 HEALTH_PORT="${HEALTH_PORT:-3000}"
 HEALTH_URL="http://127.0.0.1:${HEALTH_PORT}/health"
 echo "▶ verifying $HEALTH_URL"
-for i in $(seq 1 10); do
-  if curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
+for i in $(seq 1 20); do
+  if curl -fsS --max-time 5 --retry 0 "$HEALTH_URL" >/dev/null 2>&1; then
     echo "✔ healthy — deploy of $COMMIT complete"
     exit 0
   fi
-  echo "  not ready yet ($i/10)…"
-  sleep 3
+  echo "  not ready yet ($i/20)…"
+  sleep 5
 done
 
 echo "✖ health check never passed — check 'pm2 logs tradeaway'" >&2
