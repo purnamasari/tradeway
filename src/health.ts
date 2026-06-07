@@ -137,8 +137,18 @@ function buildReport() {
  * Starts the health HTTP server. Binds to 127.0.0.1 by default so the endpoint is
  * only reachable from the box (front it with a reverse proxy or SSH tunnel to
  * expose it). Returns the server so callers can close it on shutdown.
+ *
+ * During `pm2 reload` the old process holds the port for up to kill_timeout ms
+ * while the new process starts. We retry every second for up to maxRetryMs before
+ * giving up and exiting so PM2 can restart cleanly instead of leaving the process
+ * alive with no health endpoint.
  */
-export function startHealthServer(cfg: HealthConfig, port: number, host: string): Server {
+export function startHealthServer(
+  cfg: HealthConfig,
+  port: number,
+  host: string,
+  maxRetryMs = 12_000,
+): Server {
   config = cfg;
 
   const server = createServer((req, res) => {
@@ -155,13 +165,32 @@ export function startHealthServer(cfg: HealthConfig, port: number, host: string)
     res.end(JSON.stringify({ error: "not found" }));
   });
 
-  server.on("error", (err) => {
-    logger.error(`[health] server error: ${err.message}`);
+  const deadline = Date.now() + maxRetryMs;
+
+  const tryListen = () => {
+    server.listen(port, host, () => {
+      logger.info(`[health] listening on http://${host}:${port}/health`);
+    });
+  };
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE" && Date.now() < deadline) {
+      const remainingMs = deadline - Date.now();
+      logger.warn(
+        `[health] port ${port} in use (old process still shutting down) — retrying in 1s (${Math.ceil(remainingMs / 1000)}s left)`,
+      );
+      // Close the half-open handle before retrying.
+      server.close(() => setTimeout(tryListen, 1000));
+      return;
+    }
+    // Any other error, or EADDRINUSE after the deadline, is fatal: exit so PM2
+    // restarts the process rather than leaving it running without a health endpoint.
+    logger.error(
+      `[health] could not bind ${host}:${port} — ${err.message}. Exiting so PM2 can restart.`,
+    );
+    process.exit(1);
   });
 
-  server.listen(port, host, () => {
-    logger.info(`[health] listening on http://${host}:${port}/health`);
-  });
-
+  tryListen();
   return server;
 }
