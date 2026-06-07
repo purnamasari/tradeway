@@ -54,4 +54,11 @@ jobs:
             export PATH="$PNPM_HOME:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
             command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
             cd "${{ secrets.VPS_APP_DIR }}"
+            # Refresh the repo (including deploy.sh itself) BEFORE invoking it. This
+            # step lives in the workflow, which GitHub always reads fresh from main,
+            # so changes to deploy.sh's own steps take effect on THIS run instead of
+            # one run late (the on-disk script can't update the steps it's mid-way
+            # through executing).
+            git fetch --prune origin main
+            git reset --hard origin/main
             ./scripts/deploy.sh
