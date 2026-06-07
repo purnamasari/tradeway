@@ -37,13 +37,18 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          # Fail the step if any command fails. The action runs a non-login shell,
-          # so source the user's profile to put pnpm/pm2/node (nvm, volta, corepack)
-          # on PATH the same way an interactive SSH session would.
+          # Fail the step if any command fails. The action runs a NON-interactive,
+          # non-login shell, where ~/.bashrc typically early-returns before its PATH
+          # setup — so sourcing it doesn't expose pnpm/node/pm2. Rebuild PATH from the
+          # usual install locations (nvm, pnpm standalone, corepack, npm-global) here,
+          # before deploy.sh, so the very first run after this change already works.
           script_stop: true
           script: |
             set -e
-            [ -f "$HOME/.profile" ] && . "$HOME/.profile" || true
-            [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" || true
+            export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+            export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+            export PATH="$PNPM_HOME:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+            command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
             cd "${{ secrets.VPS_APP_DIR }}"
             ./scripts/deploy.sh

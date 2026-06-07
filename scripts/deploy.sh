@@ -11,9 +11,37 @@
 # come back healthy, so the pipeline goes red.
 set -euo pipefail
 
+# ── 0. Put pnpm/node/pm2 on PATH ──────────────────────────────────────────────
+# Over SSH / in CI this runs in a NON-interactive shell, where ~/.bashrc usually
+# early-returns before its PATH setup — so pnpm installed via the standalone
+# script, nvm, or corepack isn't found. Re-create that PATH here so the script
+# behaves like an interactive login (and so manual runs work too).
+export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+# shellcheck disable=SC1091
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+export PATH="$PNPM_HOME:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+# corepack ships pnpm with Node; enable it if pnpm still isn't resolvable.
+if ! command -v pnpm >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
+  corepack enable >/dev/null 2>&1 || true
+fi
+
+# Preflight: fail loudly with guidance instead of a bare "command not found".
+missing=""
+for bin in git pnpm pm2; do
+  command -v "$bin" >/dev/null 2>&1 || missing="$missing $bin"
+done
+if [ -n "$missing" ]; then
+  echo "✖ not on PATH:$missing" >&2
+  echo "  PATH=$PATH" >&2
+  echo "  Fix: install these for the deploy user and expose them via PNPM_HOME/" >&2
+  echo "  NVM_DIR, or add their location to the workflow before ./scripts/deploy.sh." >&2
+  exit 127
+fi
+
 cd "$(dirname "$0")/.."
 APP_DIR="$(pwd)"
-echo "▶ Deploying tradeaway in $APP_DIR"
+echo "▶ Deploying tradeaway in $APP_DIR (pnpm $(pnpm --version), node $(node --version))"
 
 # ── 1. Pull latest code ───────────────────────────────────────────────────────
 BRANCH="${DEPLOY_BRANCH:-main}"
