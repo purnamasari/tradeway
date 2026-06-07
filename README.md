@@ -171,8 +171,8 @@ log (`scheduler=bullmq|interval`).
 
 The bot runs on a VPS under [PM2](https://pm2.keymetrics.io/) straight from
 TypeScript source via `tsx` (no build step). Pushing to `main` triggers a GitHub
-Actions pipeline that SSHes in, pulls, installs, migrates, and reloads with a
-health gate.
+Actions pipeline that SSHes in, pulls, installs, syncs the schema, and reloads
+with a health gate.
 
 ### One-time VPS setup
 
@@ -182,7 +182,7 @@ git clone https://github.com/purnamasari/tradeway.git tradeaway
 cd tradeaway
 cp .env.example .env        # fill in secrets
 pnpm install --frozen-lockfile
-pnpm db:migrate             # if DATABASE_URL is set
+pnpm db:push                # if DATABASE_URL is set — reconcile schema
 
 pm2 start ecosystem.config.cjs
 pm2 save                    # persist the process list
@@ -193,8 +193,10 @@ pm2 startup                 # print the command to enable PM2 on boot, then run 
 
 `.github/workflows/deploy.yml` runs on every push to `main`: it typechecks, then
 SSHes into the VPS and runs `scripts/deploy.sh` (`git reset --hard origin/main` →
-`pnpm install` → `drizzle-kit migrate` → `pm2 reload` → verify `/health`). A red
-health check fails the deploy.
+`pnpm install` → `drizzle-kit push` → `pm2 reload` → verify `/health`). A red
+health check fails the deploy. Schema sync uses `push` (not migration files);
+additive changes apply automatically, destructive ones abort rather than
+auto-truncate (run those by hand).
 
 Add these repository secrets (**Settings → Secrets and variables → Actions**):
 
