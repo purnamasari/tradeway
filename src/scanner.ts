@@ -99,7 +99,8 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     const marketHist = await fetchHistoricalContextFromMarketHistory(db, asset.symbol, {
       fundingDays: rules.backfill.funding_days,
       oiDays: rules.backfill.oi_days,
-      candleDays: rules.backfill.candle_days,
+      // Percentile (ATR/volume) window stays reactive even though 90d are stored.
+      candleDays: rules.backfill.percentile_days,
       atrPeriod: rules.regime.atr_period,
     });
     const metricHist = await fetchHistoricalMetricsFromDb(db, asset.symbol);

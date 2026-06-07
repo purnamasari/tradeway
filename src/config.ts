@@ -73,7 +73,8 @@ export interface Rules {
   backfill: {
     funding_days: number;
     oi_days: number;
-    candle_days: number;
+    candle_days: number; // 15m candle storage window
+    percentile_days: number; // recent window for ATR/volume percentiles at scan time
     oi_interval: string; // Bybit intervalTime: 5min|15min|30min|1h|4h|1d
     min_funding: number;
     min_oi: number;

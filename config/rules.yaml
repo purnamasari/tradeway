@@ -46,7 +46,12 @@ squeeze:
 backfill:
   funding_days: 90        # funding-rate history window
   oi_days: 90             # open-interest history window
-  candle_days: 30         # 15m candle window (for ATR/volume percentiles)
+  candle_days: 90         # 15m candle storage window (research + consistency)
+  # Recent window (days) used at scan time to compute ATR percentile (regime
+  # classification) and volume percentile from the stored candles. Kept shorter
+  # than candle_days so the volatility regime stays reactive even though 90d of
+  # raw candles are retained.
+  percentile_days: 30
   oi_interval: "1h"       # Bybit intervalTime for OI snapshots
   # Minimum samples below which a symbol is considered to lack historical context
   # and is (re)backfilled at startup.

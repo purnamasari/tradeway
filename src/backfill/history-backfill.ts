@@ -26,7 +26,7 @@ import {
 } from "../data/bybit.js";
 import {
   fetchHistoricalContextFromMarketHistory,
-  latestMarketHistoryTime,
+  marketHistoryBounds,
 } from "../db/accumulate.js";
 import type { Candle } from "../types.js";
 import { logger } from "../logger.js";
@@ -58,9 +58,30 @@ async function upsert(
   return n;
 }
 
-/** Where to start an incremental fetch: just after the latest stored point, or windowStart. */
-function incrementalStart(latest: number | null, windowStart: number): number {
-  return latest !== null ? Math.max(windowStart, latest + 1) : windowStart;
+/**
+ * Compute the [start, end] ranges still missing for a series, given what's
+ * already stored. Handles both the leading gap (new data since `latest`) and the
+ * trailing gap (older data when the window was widened, e.g. candle_days 30→90),
+ * so changing a window size is picked up on the next run without a manual wipe.
+ *
+ * `refetchLatest` re-pulls the most recent stored point (used for candles, whose
+ * latest bar may have been in-progress when first stored).
+ */
+function missingRanges(
+  bounds: { earliest: number | null; latest: number | null },
+  windowStart: number,
+  now: number,
+  refetchLatest = false,
+): Array<[number, number]> {
+  const { earliest, latest } = bounds;
+  if (earliest === null || latest === null) {
+    return windowStart < now ? [[windowStart, now]] : [];
+  }
+  const ranges: Array<[number, number]> = [];
+  if (earliest > windowStart) ranges.push([windowStart, earliest]); // trailing (widened window)
+  const leadStart = refetchLatest ? latest : latest + 1;
+  if (leadStart < now) ranges.push([leadStart, now]); // leading (new data)
+  return ranges;
 }
 
 // ── Per-category backfill ─────────────────────────────────────────────────────
@@ -73,11 +94,14 @@ export async function backfillFundingHistory(
 ): Promise<number> {
   const now = Date.now();
   const windowStart = now - rules.backfill.funding_days * DAY_MS;
-  const latest = await latestMarketHistoryTime(db, symbol, "funding_rate");
-  const start = incrementalStart(latest, windowStart);
-  if (start >= now) return 0;
+  const bounds = await marketHistoryBounds(db, symbol, "funding_rate");
+  const ranges = missingRanges(bounds, windowStart, now);
+  if (ranges.length === 0) return 0;
 
-  const points: FundingPoint[] = await fetchFundingHistoryRange(symbol, category, start, now);
+  const points: FundingPoint[] = [];
+  for (const [start, end] of ranges) {
+    points.push(...(await fetchFundingHistoryRange(symbol, category, start, end)));
+  }
   if (points.length === 0) return 0;
 
   const rows: InsertRow[] = points.map((p) => ({
@@ -98,17 +122,14 @@ export async function backfillOpenInterestHistory(
 ): Promise<number> {
   const now = Date.now();
   const windowStart = now - rules.backfill.oi_days * DAY_MS;
-  const latest = await latestMarketHistoryTime(db, symbol, "open_interest");
-  const start = incrementalStart(latest, windowStart);
-  if (start >= now) return 0;
+  const bounds = await marketHistoryBounds(db, symbol, "open_interest");
+  const ranges = missingRanges(bounds, windowStart, now);
+  if (ranges.length === 0) return 0;
 
-  const points: OIPoint[] = await fetchOIHistoryRange(
-    symbol,
-    category,
-    rules.backfill.oi_interval,
-    start,
-    now,
-  );
+  const points: OIPoint[] = [];
+  for (const [start, end] of ranges) {
+    points.push(...(await fetchOIHistoryRange(symbol, category, rules.backfill.oi_interval, start, end)));
+  }
   if (points.length === 0) return 0;
 
   const rows: InsertRow[] = points.map((p) => ({
@@ -129,12 +150,15 @@ export async function backfillCandleHistory(
 ): Promise<number> {
   const now = Date.now();
   const windowStart = now - rules.backfill.candle_days * DAY_MS;
-  const latest = await latestMarketHistoryTime(db, symbol, "open");
-  // Re-fetch the latest stored candle (it may have been in-progress) — upsert handles it.
-  const start = latest !== null ? Math.max(windowStart, latest) : windowStart;
-  if (start > now) return 0;
+  const bounds = await marketHistoryBounds(db, symbol, "open");
+  // refetchLatest: the most recent stored bar may have been in-progress — upsert refreshes it.
+  const ranges = missingRanges(bounds, windowStart, now, true);
+  if (ranges.length === 0) return 0;
 
-  const candles: Candle[] = await fetchCandlesRange(symbol, "15m", category, start, now);
+  const candles: Candle[] = [];
+  for (const [start, end] of ranges) {
+    candles.push(...(await fetchCandlesRange(symbol, "15m", category, start, end)));
+  }
   if (candles.length === 0) return 0;
 
   const rows: InsertRow[] = candles.map((c) => ({
@@ -215,7 +239,7 @@ export async function historicalContextInsufficient(
   const ctx = await fetchHistoricalContextFromMarketHistory(db, symbol, {
     fundingDays: rules.backfill.funding_days,
     oiDays: rules.backfill.oi_days,
-    candleDays: rules.backfill.candle_days,
+    candleDays: rules.backfill.percentile_days,
     atrPeriod: rules.regime.atr_period,
   });
   if (!ctx) return true;

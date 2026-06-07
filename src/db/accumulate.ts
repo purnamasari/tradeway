@@ -296,6 +296,8 @@ export async function fetchHistoricalMetricsFromDb(
 export interface MarketHistoryOptions {
   fundingDays: number;
   oiDays: number;
+  /** Recent window (days) of candles used for ATR & volume percentiles. May be
+   *  shorter than the full stored candle history (backfill.candle_days). */
   candleDays: number;
   atrPeriod: number;
 }
@@ -384,25 +386,29 @@ export async function fetchHistoricalContextFromMarketHistory(
   }
 }
 
-/** Latest stored timestamp (unix ms) for a market_history column, for incremental backfill. */
-export async function latestMarketHistoryTime(
+export type MarketHistoryColumn = "open" | "open_interest" | "funding_rate";
+
+/** Earliest/latest stored timestamps (unix ms) for a column, for gap-aware incremental backfill. */
+export async function marketHistoryBounds(
   db: Db,
   symbol: string,
-  column: "open" | "open_interest" | "funding_rate",
-): Promise<number | null> {
-  if (!db) return null;
+  column: MarketHistoryColumn,
+): Promise<{ earliest: number | null; latest: number | null }> {
+  if (!db) return { earliest: null, latest: null };
   try {
     const col = marketHistory[column];
     const rows = await db
-      .select({ ts: marketHistory.timestamp })
+      .select({ min: sql<string | null>`min(${marketHistory.timestamp})`, max: sql<string | null>`max(${marketHistory.timestamp})` })
       .from(marketHistory)
-      .where(and(eq(marketHistory.symbol, symbol), isNotNull(col)))
-      .orderBy(desc(marketHistory.timestamp))
-      .limit(1);
-    return rows[0] ? new Date(rows[0].ts).getTime() : null;
+      .where(and(eq(marketHistory.symbol, symbol), isNotNull(col)));
+    const r = rows[0];
+    return {
+      earliest: r?.min ? new Date(r.min).getTime() : null,
+      latest: r?.max ? new Date(r.max).getTime() : null,
+    };
   } catch (err) {
-    logger.warn(`[db] latestMarketHistoryTime failed for ${symbol}/${column}: ${(err as Error).message}`);
-    return null;
+    logger.warn(`[db] marketHistoryBounds failed for ${symbol}/${column}: ${(err as Error).message}`);
+    return { earliest: null, latest: null };
   }
 }
 
