@@ -106,7 +106,13 @@ EMA20: ${ema20.toFixed(4)}  EMA50: ${ema50.toFixed(4)}
 Candles (OHLCV, oldest first): ${JSON.stringify(recent)}
 
 Decide structure (HH/HL = bullish, LH/LL = bearish, otherwise neutral).
-Respond ONLY as JSON: {"trend":"bullish|bearish|neutral","confidence":0-100,"reasoning":"one short sentence","key_levels":{"support":number,"resistance":number}}`;
+
+Return ONLY valid JSON.
+Do not wrap in markdown.
+Do not explain.
+Do not use code fences.
+
+{"trend":"bullish|bearish|neutral","confidence":0-100,"reasoning":"one short sentence","key_levels":{"support":number,"resistance":number}}`;
 
   const res = await m.generateContent(prompt);
   const raw = res.response.text();
