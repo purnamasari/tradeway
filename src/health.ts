@@ -20,6 +20,12 @@ interface SymbolHealth {
   errorCount: number;
 }
 
+/** Liveness snapshot from the WebSocket feed, if one is running. */
+export interface FeedStatus {
+  connected: boolean;
+  symbols: Array<{ symbol: string; lastKlineAgoMs: number | null }>;
+}
+
 interface HealthConfig {
   version: string;
   commit: string;
@@ -30,6 +36,8 @@ interface HealthConfig {
   redis: boolean;
   telegram: boolean;
   ai: boolean;
+  /** Optional WS-feed liveness provider; absent when running in REST mode. */
+  feedStatus?: () => FeedStatus;
 }
 
 const startedAt = Date.now();
@@ -93,7 +101,13 @@ function buildReport() {
   });
 
   const staleSymbols = symbols.filter((s) => s.stale).map((s) => s.symbol);
-  const status = grace ? "starting" : staleSymbols.length > 0 ? "unhealthy" : "ok";
+
+  // A disconnected WebSocket feed means scans may be reading stale buffers while
+  // still "succeeding" — so it must drag health down independently of heartbeats.
+  const feed = config?.feedStatus?.();
+  const feedDown = !grace && feed !== undefined && !feed.connected;
+
+  const status = grace ? "starting" : staleSymbols.length > 0 || feedDown ? "unhealthy" : "ok";
   const mem = process.memoryUsage();
 
   return {
@@ -103,6 +117,7 @@ function buildReport() {
     pid: process.pid,
     uptimeSec: Math.floor(uptimeMs / 1000),
     staleSymbols,
+    feed: feed ?? null,
     dependencies: {
       db: config?.db ?? false,
       redis: config?.redis ?? false,

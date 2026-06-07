@@ -46,5 +46,4 @@ jobs:
             [ -f "$HOME/.profile" ] && . "$HOME/.profile" || true
             [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" || true
             cd "${{ secrets.VPS_APP_DIR }}"
-            chmod +x scripts/deploy.sh scripts/healthcheck.sh
             ./scripts/deploy.sh

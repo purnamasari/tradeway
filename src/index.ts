@@ -12,6 +12,8 @@ import { runRetentionCleanup } from "./db/accumulate.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
 import { fetchTicker } from "./data/bybit.js";
+import { MarketFeed } from "./data/ws-feed.js";
+import { startScheduler, type PeriodicTask } from "./queue/scheduler.js";
 import { logger } from "./logger.js";
 import { startHealthServer } from "./health.js";
 import { readFileSync } from "node:fs";
@@ -90,11 +92,10 @@ async function main() {
     await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
   }
 
+  // Immediate retention pass at boot; the recurring schedule is a task registered
+  // with the scheduler below (loop mode only).
   if (db && !mock) {
     void runRetentionCleanup(db, rules);
-    if (!once) {
-      setInterval(() => void runRetentionCleanup(db, rules), 24 * 60 * 60 * 1000);
-    }
   }
 
   const getContext: ContextProvider = mock
@@ -119,6 +120,21 @@ async function main() {
     return;
   }
 
+  // ── WebSocket market feed ─────────────────────────────────────────────────────
+  // Loop mode, live data only. Streams candles/ticker into in-memory buffers so
+  // scans read current data instantly instead of firing six REST calls each pass.
+  // With MARKET_FEED=rest (or mock) we keep the per-scan REST path unchanged.
+  let feed: MarketFeed | null = null;
+  if (!mock && env.marketFeed === "ws") {
+    feed = new MarketFeed(enabled.map((a) => a.symbol), env.bybitCategory);
+    await feed.start();
+    deps.getContext = (symbol) => feed!.getContext(symbol);
+    logger.info("[boot] market feed: websocket (streamed candles + ticker)");
+    // Funding/OI history + ticker aren't streamed — refreshed by the poll task below.
+  } else if (!mock) {
+    logger.info("[boot] market feed: rest (per-scan polling)");
+  }
+
   // ── Health server ───────────────────────────────────────────────────────────
   // Loop mode only: exposes /health for PM2-external monitoring, the CD health
   // gate, and cron checks. Staleness is judged against the longest scan interval.
@@ -135,6 +151,7 @@ async function main() {
         redis: Boolean(env.redisUrl),
         telegram: Boolean(env.telegramBotToken),
         ai: Boolean(env.geminiApiKey),
+        feedStatus: feed ? () => feed!.health() : undefined,
       },
       env.healthPort,
       env.healthHost,
@@ -166,41 +183,65 @@ async function main() {
   process.on("uncaughtException", onFatal("uncaughtException"));
   process.on("unhandledRejection", onFatal("unhandledRejection"));
 
-  // Per-asset interval loop with startup jitter so symbols don't fire together.
+  // ── Recurring work ────────────────────────────────────────────────────────────
+  // Every periodic job is expressed once as a task; the scheduler runs them on
+  // BullMQ when Redis is configured, else on a setInterval fallback.
+  const tasks: PeriodicTask[] = [];
+
+  // Per-symbol scans — fire at boot (after jitter), then every scan_interval.
   for (const asset of enabled) {
-    const intervalMs = asset.scan_interval * 60_000;
-    const jitter = Math.floor(Math.random() * 10_000);
-    setTimeout(() => {
-      void scanSymbol(asset, deps);
-      setInterval(() => void scanSymbol(asset, deps), intervalMs);
-    }, jitter);
-    logger.info(`[boot] scheduled ${asset.symbol} every ${asset.scan_interval}m (jitter ${jitter}ms)`);
+    tasks.push({
+      name: `scan:${asset.symbol}`,
+      everyMs: asset.scan_interval * 60_000,
+      runAtBoot: true,
+      jitterMs: 10_000,
+      run: () => scanSymbol(asset, deps),
+    });
   }
 
-  // ── Outcome evaluator (1-minute polling) ────────────────────────────────────
-  // Only runs in loop mode with a database and live price feed.
-  if (db && !mock) {
+  // Funding/OI history refresh (WS mode only; REST mode fetches it per scan).
+  if (feed) {
+    const f = feed;
+    tasks.push({
+      name: "poll:derived",
+      everyMs: 5 * 60_000,
+      run: async () => {
+        for (const asset of enabled) await f.refreshDerived(asset.symbol);
+      },
+    });
+  }
+
+  // Outcome evaluation (60s) + daily retention — only with a database.
+  if (db) {
+    const database = db;
     const category = env.bybitCategory;
     const priceFetcher: PriceFetcher = async (symbol) => {
+      // Prefer the streamed price; fall back to a REST ticker if the feed has no
+      // value yet (or isn't running).
+      const streamed = feed?.lastPrice(symbol);
+      if (streamed != null) return streamed;
       const ticker = await fetchTicker(symbol, category);
       return ticker.lastPrice;
     };
-
-    // Initial check after 30s (give scanners time to produce signals first).
-    setTimeout(() => {
-      void evaluateOutcomes(db, priceFetcher, notifier);
-    }, 30_000);
-
-    // Then every 60s.
-    setInterval(() => {
-      void evaluateOutcomes(db, priceFetcher, notifier);
-    }, 60_000);
-
-    logger.info("[boot] outcome tracker: every 60s");
+    tasks.push({
+      name: "outcome",
+      everyMs: 60_000,
+      run: () => evaluateOutcomes(database, priceFetcher, notifier),
+    });
+    tasks.push({
+      name: "retention",
+      everyMs: 24 * 60 * 60 * 1000,
+      run: () => runRetentionCleanup(database, rules),
+    });
   }
+
+  const scheduler = await startScheduler(env.redisUrl, tasks);
+  logger.info(`[boot] scheduler=${scheduler.kind} · ${tasks.length} tasks`);
 
   const shutdown = (signal: string) => {
     logger.info(`[boot] ${signal} — shutting down`);
+    void scheduler.stop();
+    feed?.stop();
     const done = () => process.exit(0);
     if (env.opsAlerts) {
       void notifier.sendOps(`🟡 tradeaway stopping (${signal})`).finally(done);
