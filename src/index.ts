@@ -87,17 +87,6 @@ async function main() {
     return;
   }
 
-  // ── Startup bootstrap: backfill symbols that lack sufficient history. ──────
-  if (db && !mock) {
-    await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
-  }
-
-  // Immediate retention pass at boot; the recurring schedule is a task registered
-  // with the scheduler below (loop mode only).
-  if (db && !mock) {
-    void runRetentionCleanup(db, rules);
-  }
-
   const getContext: ContextProvider = mock
     ? (symbol, category) => buildMockContext(symbol, category, mockScenario)
     : buildMarketContext;
@@ -113,6 +102,7 @@ async function main() {
   );
 
   if (once) {
+    if (db) await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
     for (const asset of enabled) {
       await scanSymbol(asset, deps);
     }
@@ -120,24 +110,19 @@ async function main() {
     return;
   }
 
-  // ── WebSocket market feed ─────────────────────────────────────────────────────
-  // Loop mode, live data only. Streams candles/ticker into in-memory buffers so
-  // scans read current data instantly instead of firing six REST calls each pass.
-  // With MARKET_FEED=rest (or mock) we keep the per-scan REST path unchanged.
-  let feed: MarketFeed | null = null;
-  if (!mock && env.marketFeed === "ws") {
-    feed = new MarketFeed(enabled.map((a) => a.symbol), env.bybitCategory);
-    await feed.start();
-    deps.getContext = (symbol) => feed!.getContext(symbol);
-    logger.info("[boot] market feed: websocket (streamed candles + ticker)");
-    // Funding/OI history + ticker aren't streamed — refreshed by the poll task below.
-  } else if (!mock) {
-    logger.info("[boot] market feed: rest (per-scan polling)");
+  // Decide the market-data source up front. The streamed feed needs the global
+  // WebSocket (Node >= 21); if it's missing, degrade to REST instead of crashing.
+  let useWs = !mock && env.marketFeed === "ws";
+  if (useWs && typeof WebSocket === "undefined") {
+    logger.warn("[boot] global WebSocket unavailable (needs Node >= 21) — falling back to MARKET_FEED=rest");
+    useWs = false;
   }
+  let feed: MarketFeed | null = null;
 
-  // ── Health server ───────────────────────────────────────────────────────────
-  // Loop mode only: exposes /health for PM2-external monitoring, the CD health
-  // gate, and cron checks. Staleness is judged against the longest scan interval.
+  // ── Health server (started FIRST) ─────────────────────────────────────────────
+  // Bind /health before any slow boot work (history bootstrap, WS REST-seeding) so
+  // the endpoint answers immediately for the deploy health gate, PM2-external
+  // monitoring, and cron checks — a slow seed must not look like a dead process.
   const maxIntervalMs = Math.max(...enabled.map((a) => a.scan_interval)) * 60_000;
   const info = buildInfo();
   if (env.healthPort > 0) {
@@ -151,7 +136,12 @@ async function main() {
         redis: Boolean(env.redisUrl),
         telegram: Boolean(env.telegramBotToken),
         ai: Boolean(env.geminiApiKey),
-        feedStatus: feed ? () => feed!.health() : undefined,
+        // Track feed liveness only in WS mode. Reads `feed` once assigned below; a
+        // null feed (not yet started, or REST fallback) reports connected so it
+        // never trips a false 503.
+        feedStatus: useWs
+          ? () => (feed ? feed.health() : { connected: true, symbols: [] })
+          : undefined,
       },
       env.healthPort,
       env.healthHost,
@@ -182,6 +172,32 @@ async function main() {
   };
   process.on("uncaughtException", onFatal("uncaughtException"));
   process.on("unhandledRejection", onFatal("unhandledRejection"));
+
+  // ── Slow boot work (health endpoint is already serving) ───────────────────────
+  // Backfill symbols lacking history, then an immediate retention pass. On a fresh
+  // DB the backfill can take a while — fine now that /health is already up.
+  if (db) {
+    await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
+    void runRetentionCleanup(db, rules);
+  }
+
+  // ── WebSocket market feed ─────────────────────────────────────────────────────
+  // Streams candles/ticker into in-memory buffers so scans read current data
+  // instantly. A start failure degrades to REST polling rather than taking down
+  // the process (the default getContext stays buildMarketContext).
+  if (useWs) {
+    try {
+      feed = new MarketFeed(enabled.map((a) => a.symbol), env.bybitCategory);
+      await feed.start();
+      deps.getContext = (symbol) => feed!.getContext(symbol);
+      logger.info("[boot] market feed: websocket (streamed candles + ticker)");
+    } catch (err) {
+      logger.warn(`[boot] websocket feed failed to start (${(err as Error).message}) — falling back to REST`);
+      feed = null;
+    }
+  } else if (!mock) {
+    logger.info("[boot] market feed: rest (per-scan polling)");
+  }
 
   // ── Recurring work ────────────────────────────────────────────────────────────
   // Every periodic job is expressed once as a task; the scheduler runs them on
