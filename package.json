@@ -1,0 +1,27 @@
+{
+  "name": "tradeaway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Crypto signal bot — regime + AI trend gating, S/R strategy detectors, scored alerts. Blueprint v3 MVP.",
+  "scripts": {
+    "scan": "tsx src/index.ts",
+    "scan:once": "tsx src/index.ts --once",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "yaml": "^2.6.1"
+  },
+  "optionalDependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "grammy": "^1.30.0",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

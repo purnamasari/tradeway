@@ -1,0 +1,40 @@
+# config/rules.yaml — scoring weights, regime thresholds, retention.
+
+regime:
+  adx_period: 14
+  ema_fast: 20
+  ema_slow: 50
+  atr_period: 14
+  trending_adx: 25         # ADX >= this => trend strength present
+  ranging_adx: 18          # ADX <= this => no trend
+  ema_spread_flat: 0.001   # |ema20-ema50|/ema50 below this => flat
+  high_vol_atr_pct: 80     # ATR percentile >= this => high volatility
+  low_vol_atr_pct: 20      # ATR percentile <= this => low volatility
+
+trend:
+  confidence_floor: 40     # below this, fall back to next tier
+  flash_timeout_ms: 5000
+  flash_lite_timeout_ms: 3000
+
+# Confidence = market-conditions score (0-100).
+confidence_weights:
+  funding_percentile: 35
+  oi_zscore: 30
+  volume_percentile: 25
+  regime_alignment: 10
+
+# Setup quality = technical-structure score (0-100), all formula-based.
+setup_quality_weights:
+  sr_level_strength: 30
+  engulf_body_ratio: 25
+  htf_aligned: 20
+  sweep_wick_ratio: 15
+  structure_intact: 10
+
+retention:
+  raw_metrics: 180   # days
+  aggregated_daily: -1
+  signals: -1
+  regime_log: 90
+  ai_trend_log: 90
+  chart_png_r2: 30

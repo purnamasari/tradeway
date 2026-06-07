@@ -1,0 +1,42 @@
+# config/watchlist.yaml — per-asset scanner config + asset class metadata.
+global:
+  min_confidence: 65
+  min_setup_quality: 60
+  alert_cooldown_min: 30
+  max_alerts_per_hour: 10
+  min_rr: 2.0
+
+assets:
+  BTCUSDT:
+    enabled: true
+    scan_interval: 10        # minutes
+    min_confidence: 70       # stricter — fewer false positives
+    asset_class: benchmark
+    notes: "Most liquid, most reliable setups"
+
+  ETHUSDT:
+    enabled: true
+    scan_interval: 10
+    asset_class: derivatives_leader
+    notes: "Funding/OI most informative here"
+
+  SOLUSDT:
+    enabled: true
+    scan_interval: 10
+    asset_class: momentum
+    notes: "Trend setups appear more often"
+
+  ZECUSDT:
+    enabled: true
+    scan_interval: 5         # moves more aggressively
+    min_confidence: 65
+    asset_class: mean_reversion
+    notes: "Liquidity sweeps valid more often"
+
+  HYPEUSDT:
+    enabled: true
+    scan_interval: 5         # volatile, squeezes frequent
+    min_confidence: 75       # stricter — higher noise
+    max_position_size_multiplier: 0.5
+    asset_class: squeeze_candidate
+    notes: "Squeeze setups most frequent here"
