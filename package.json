@@ -1,6 +1,7 @@
 {
   "name": "tradeaway",
   "version": "0.1.0",
+  "packageManager": "pnpm@10.32.1",
   "private": true,
   "type": "module",
   "description": "Crypto signal bot — regime + AI trend gating, S/R strategy detectors, scored alerts. Blueprint v3 MVP.",
