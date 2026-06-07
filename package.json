@@ -9,9 +9,16 @@
     "scan:once": "tsx src/index.ts --once",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "test:telegram": "tsx src/test-telegram.ts",
+    "test:chart": "tsx src/test-chart.ts",
+    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.9",
+    "puppeteer-core": "^25.1.0",
     "yaml": "^2.6.1"
   },
   "optionalDependencies": {
@@ -21,7 +28,14 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "puppeteer"
+    ]
   }
 }

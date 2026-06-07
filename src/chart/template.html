@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=800" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a;
+    width: 800px;
+    height: 500px;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+  }
+  #chart { width: 800px; height: 500px; position: relative; }
+
+  /* ── Header overlay ───────────────────────────────────────────────── */
+  #header {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: linear-gradient(180deg, rgba(10,10,10,0.92) 0%, rgba(10,10,10,0.6) 80%, transparent 100%);
+    pointer-events: none;
+  }
+  #header .symbol {
+    font-size: 15px;
+    font-weight: 800;
+    color: #f0f0f0;
+    letter-spacing: -0.02em;
+  }
+  #header .badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  #header .direction-long  { background: #0d2e1a; color: #4ade80; border: 1px solid #166534; }
+  #header .direction-short { background: #2e0d0d; color: #f87171; border: 1px solid #7f1d1d; }
+  #header .strategy        { background: #0d1b2e; color: #60a5fa; border: 1px solid #1e3a5f; }
+
+  #header .stats {
+    margin-left: auto;
+    display: flex;
+    gap: 12px;
+    font-size: 11px;
+    color: #9ca3af;
+  }
+  #header .stats span { white-space: nowrap; }
+  #header .stats .label { color: #6b7280; }
+  #header .stats .value { color: #e5e7eb; font-weight: 600; }
+
+  /* ── Legend overlay (bottom-left) ──────────────────────────────────── */
+  #legend {
+    position: absolute;
+    bottom: 30px; left: 12px;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    pointer-events: none;
+    font-size: 10px;
+    color: #6b7280;
+  }
+  #legend .item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  #legend .swatch {
+    width: 14px;
+    height: 2px;
+    border-radius: 1px;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<div id="chart">
+  <div id="header">
+    <span class="symbol" id="hdr-symbol"></span>
+    <span class="badge strategy" id="hdr-strategy"></span>
+    <span class="badge" id="hdr-direction"></span>
+    <div class="stats">
+      <span><span class="label">Conf </span><span class="value" id="hdr-conf"></span></span>
+      <span><span class="label">Quality </span><span class="value" id="hdr-quality"></span></span>
+      <span><span class="label">RR </span><span class="value" id="hdr-rr"></span></span>
+    </div>
+  </div>
+  <div id="legend"></div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+(function () {
+  const data = window.__CHART_DATA__;
+  if (!data) return;
+
+  const { candles, signal } = data;
+
+  // ── Header ──────────────────────────────────────────────────────────
+  document.getElementById('hdr-symbol').textContent = signal.symbol;
+  document.getElementById('hdr-strategy').textContent = signal.strategy.replace(/_/g, ' ');
+
+  const dirEl = document.getElementById('hdr-direction');
+  dirEl.textContent = signal.direction.toUpperCase();
+  dirEl.className = 'badge direction-' + signal.direction;
+
+  document.getElementById('hdr-conf').textContent = signal.confidence + '/100';
+  document.getElementById('hdr-quality').textContent = signal.setup_quality + '/100';
+  document.getElementById('hdr-rr').textContent = '1:' + signal.rr;
+
+  // ── Chart ───────────────────────────────────────────────────────────
+  const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    width: 800,
+    height: 500,
+    layout: {
+      background: { type: 'solid', color: '#0a0a0a' },
+      textColor: '#6b7280',
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: '#141414' },
+      horzLines: { color: '#141414' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Hidden },
+    rightPriceScale: {
+      borderColor: '#1f1f1f',
+      scaleMargins: { top: 0.12, bottom: 0.06 },
+    },
+    timeScale: {
+      borderColor: '#1f1f1f',
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 3,
+      barSpacing: 8,
+    },
+    handleScroll: false,
+    handleScale: false,
+  });
+
+  // Candlestick series
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#22c55e',
+    downColor: '#ef4444',
+    borderUpColor: '#22c55e',
+    borderDownColor: '#ef4444',
+    wickUpColor: '#22c55e80',
+    wickDownColor: '#ef444480',
+  });
+
+  // Convert candles to Lightweight Charts format
+  const chartCandles = candles.map(function (c) {
+    return { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
+  });
+  candleSeries.setData(chartCandles);
+
+  // ── Price lines ─────────────────────────────────────────────────────
+  const legendItems = [];
+
+  function addPriceLine(price, color, title, lineWidth, lineStyle) {
+    if (price == null || !isFinite(price)) return;
+    candleSeries.createPriceLine({
+      price: price,
+      color: color,
+      lineWidth: lineWidth || 1,
+      lineStyle: lineStyle != null ? lineStyle : LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: title,
+    });
+    legendItems.push({ color: color, label: title + ': ' + formatPrice(price) });
+  }
+
+  // Support
+  if (signal.snapshot && signal.snapshot.support) {
+    addPriceLine(signal.snapshot.support.price, '#22c55e', 'Support', 1, LightweightCharts.LineStyle.Dotted);
+  }
+
+  // Resistance
+  if (signal.snapshot && signal.snapshot.resistance) {
+    addPriceLine(signal.snapshot.resistance.price, '#ef4444', 'Resistance', 1, LightweightCharts.LineStyle.Dotted);
+  }
+
+  // Entry zone (midpoint line)
+  var entryMid = (signal.entry_low + signal.entry_high) / 2;
+  addPriceLine(entryMid, '#facc15', 'Entry', 2, LightweightCharts.LineStyle.Solid);
+
+  // Stop Loss
+  addPriceLine(signal.sl, '#f87171', 'SL', 1, LightweightCharts.LineStyle.Dashed);
+
+  // Take Profit
+  addPriceLine(signal.tp, '#4ade80', 'TP', 1, LightweightCharts.LineStyle.Dashed);
+
+  // ── Entry zone shading (using two baseline-like area series) ────────
+  // Upper entry band
+  var entryAreaUpper = chart.addAreaSeries({
+    topColor: 'rgba(250, 204, 21, 0.08)',
+    bottomColor: 'rgba(250, 204, 21, 0.08)',
+    lineColor: 'rgba(250, 204, 21, 0.25)',
+    lineWidth: 1,
+    priceScaleId: '',
+    lastValueVisible: false,
+    priceLineVisible: false,
+  });
+  entryAreaUpper.setData(chartCandles.map(function (c) {
+    return { time: c.time, value: signal.entry_high };
+  }));
+
+  var entryAreaLower = chart.addAreaSeries({
+    topColor: 'rgba(10, 10, 10, 1)',
+    bottomColor: 'rgba(10, 10, 10, 1)',
+    lineColor: 'rgba(250, 204, 21, 0.25)',
+    lineWidth: 1,
+    priceScaleId: '',
+    lastValueVisible: false,
+    priceLineVisible: false,
+  });
+  entryAreaLower.setData(chartCandles.map(function (c) {
+    return { time: c.time, value: signal.entry_low };
+  }));
+
+  // ── Legend ──────────────────────────────────────────────────────────
+  var legendEl = document.getElementById('legend');
+  legendItems.forEach(function (item) {
+    var div = document.createElement('div');
+    div.className = 'item';
+    div.innerHTML =
+      '<span class="swatch" style="background:' + item.color + '"></span>' +
+      '<span>' + item.label + '</span>';
+    legendEl.appendChild(div);
+  });
+
+  // Fit content
+  chart.timeScale().fitContent();
+
+  // Signal we're ready for screenshot
+  window.__CHART_READY__ = true;
+
+  function formatPrice(p) {
+    if (p >= 1000) return p.toFixed(2);
+    if (p >= 1) return p.toFixed(4);
+    return p.toFixed(6);
+  }
+})();
+</script>
+</body>
+</html>

@@ -30,5 +30,6 @@ export async function buildMarketContext(
     openInterest: ticker.openInterest,
     fundingHistory,
     oiHistory,
+    historyConfidence: 0.0,
   };
 }

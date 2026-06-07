@@ -20,7 +20,7 @@ export function scoreConfidence(
   // Funding: extreme (very low or very high) funding is informative. Score by
   // distance from the median of the 90d window.
   let fundingPct = 50;
-  if (ctx.fundingRate !== null && ctx.fundingHistory.length > 5) {
+  if (ctx.fundingRate !== null && ctx.fundingHistory.length >= 50) {
     fundingPct = percentileRank(ctx.fundingRate, ctx.fundingHistory);
   }
   const fundingExtremity = Math.abs(fundingPct - 50) / 50; // 0..1
@@ -28,15 +28,18 @@ export function scoreConfidence(
 
   // OI z-score: large positioning changes => stronger signal.
   let oiZ = 0;
-  if (ctx.openInterest !== null && ctx.oiHistory.length > 5) {
+  if (ctx.openInterest !== null && ctx.oiHistory.length >= 30) {
     oiZ = zScore(ctx.openInterest, ctx.oiHistory);
   }
   const oiScore = Math.min(1, Math.abs(oiZ) / 3) * weights.oi_zscore;
 
   // Volume percentile of latest 15m candle vs its recent window.
-  const vols = ctx.candles15m.map((c) => c.volume);
-  const lastVol = vols.at(-1) ?? 0;
-  const volPct = percentileRank(lastVol, vols.slice(-120));
+  const useDbVol = ctx.volumeHistory !== undefined && ctx.volumeHistory.length >= 50;
+  const vols = useDbVol
+    ? ctx.volumeHistory!
+    : ctx.candles15m.map((c) => c.volume);
+  const lastVol = ctx.candles15m.at(-1)?.volume ?? 0;
+  const volPct = percentileRank(lastVol, useDbVol ? vols : vols.slice(-120));
   const volScore = (volPct / 100) * weights.volume_percentile;
 
   const regimeScore = regimeAligned ? weights.regime_alignment : 0;
@@ -93,8 +96,17 @@ export function scoreSetupQuality(
   const structureIntact = structureClean(last3);
   const structureScore = structureIntact ? weights.structure_intact : 0;
 
+  let totalWeight = weights.engulf_body_ratio + weights.htf_aligned + weights.structure_intact;
+  if (input.srLevel !== null) {
+    totalWeight += weights.sr_level_strength;
+  }
+  if (input.sweepWickRatio !== undefined) {
+    totalWeight += weights.sweep_wick_ratio;
+  }
+
+  const rawScore = srScore + engulfScore + htfScore + sweepScore + structureScore;
   const setup_quality = Math.round(
-    Math.min(100, srScore + engulfScore + htfScore + sweepScore + structureScore),
+    Math.min(100, (rawScore / totalWeight) * 100),
   );
 
   return {

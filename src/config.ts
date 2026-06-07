@@ -60,7 +60,16 @@ export interface Rules {
     sweep_wick_ratio: number;
     structure_intact: number;
   };
-  retention: Record<string, number>;
+  squeeze: {
+    funding_extreme_low: number;
+    funding_extreme_high: number;
+    oi_zscore_min: number;
+    oi_zscore_max: number;
+  };
+  retention: {
+    metric_history_days: number;
+    regime_log_days: number;
+  };
 }
 
 function load<T>(file: string): T {
@@ -87,6 +96,7 @@ export interface Env {
   telegramBotToken?: string;
   telegramChatId?: string;
   redisUrl?: string;
+  databaseUrl?: string;
   bybitCategory: string;
 }
 
@@ -96,6 +106,7 @@ export function loadEnv(): Env {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: process.env.TELEGRAM_CHAT_ID || undefined,
     redisUrl: process.env.REDIS_URL || undefined,
+    databaseUrl: process.env.DATABASE_URL || undefined,
     bybitCategory: process.env.BYBIT_CATEGORY || "linear",
   };
 }

@@ -109,20 +109,61 @@ Decide structure (HH/HL = bullish, LH/LL = bearish, otherwise neutral).
 Respond ONLY as JSON: {"trend":"bullish|bearish|neutral","confidence":0-100,"reasoning":"one short sentence","key_levels":{"support":number,"resistance":number}}`;
 
   const res = await m.generateContent(prompt);
-  const text = res.response.text();
-  const parsed = JSON.parse(text) as {
+  const raw = res.response.text();
+  const jsonText = extractJsonText(raw);
+  const parsed = JSON.parse(jsonText) as {
     trend: TrendResult["trend"];
     confidence: number;
     reasoning?: string;
     key_levels?: { support: number; resistance: number };
   };
+
+  // Validate the trend field
+  const validTrends = new Set(["bullish", "bearish", "neutral"]);
+  if (!validTrends.has(parsed.trend)) {
+    throw new Error(`Invalid trend value: "${parsed.trend}"`);
+  }
+
   return {
     trend: parsed.trend,
-    confidence: Math.max(0, Math.min(100, parsed.confidence)),
+    confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
     source: "gemini_flash",
     reasoning: parsed.reasoning,
     keyLevels: parsed.key_levels,
   };
+}
+
+// ── Extract JSON from potentially messy Gemini output ─────────────────────────
+function extractJsonText(raw: string): string {
+  const trimmed = raw.trim();
+
+  // 1. Already clean JSON
+  if (trimmed.startsWith("{")) {
+    return trimmed;
+  }
+
+  // 2. Markdown-fenced JSON: ```json ... ``` or ``` ... ```
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)```/i);
+  if (fenceMatch?.[1]?.trim().startsWith("{")) {
+    return fenceMatch[1].trim();
+  }
+
+  // 3. JSON embedded in prose — find the first { and match to its closing }
+  const start = trimmed.indexOf("{");
+  if (start !== -1) {
+    let depth = 0;
+    for (let i = start; i < trimmed.length; i++) {
+      if (trimmed[i] === "{") depth++;
+      else if (trimmed[i] === "}") depth--;
+      if (depth === 0) {
+        return trimmed.slice(start, i + 1);
+      }
+    }
+    // Unclosed brace — still try the substring (JSON.parse will throw with a clearer error)
+    return trimmed.slice(start);
+  }
+
+  throw new Error(`No JSON object found in model response: ${trimmed.slice(0, 80)}…`);
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

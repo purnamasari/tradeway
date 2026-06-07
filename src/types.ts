@@ -107,4 +107,42 @@ export interface MarketContext {
   openInterest: number | null;
   fundingHistory: number[]; // recent funding rates for percentile
   oiHistory: number[]; // recent OI for z-score
+  atrHistory?: number[];
+  volumeHistory?: number[];
+  historyConfidence: number;
 }
+
+// Mock scenario selector for deterministic offline testing.
+export type MockScenario = "sweep" | "pullback" | "squeeze";
+
+// ── Outcome tracking ─────────────────────────────────────────────────────────
+export type OutcomeStatus = "PENDING_ENTRY" | "ACTIVE" | "TP_HIT" | "SL_HIT" | "EXPIRED";
+
+export interface SignalOutcome {
+  id: number;
+  signalId: number;
+  symbol: string;
+  strategy: StrategyKind;
+  direction: Direction;
+  status: OutcomeStatus;
+  entryPrice: number;
+  sl: number;
+  tp: number;
+  hitPrice: number | null;
+  openedAt: Date;
+  closedAt: Date | null;
+  expiresAt: Date;
+}
+
+/** Strategy-specific TTLs in milliseconds. */
+export const ENTRY_TTL: Record<StrategyKind, number> = {
+  liquidity_sweep: 1 * 60 * 60 * 1000,   // 1h to enter
+  trend_pullback:  1 * 60 * 60 * 1000,   // 1h to enter
+  squeeze:         30 * 60 * 1000,        // 30m to enter
+};
+
+export const OUTCOME_TTL: Record<StrategyKind, number> = {
+  liquidity_sweep: 4 * 60 * 60 * 1000,   // 4h to hit TP/SL
+  trend_pullback:  6 * 60 * 60 * 1000,   // 6h to hit TP/SL
+  squeeze:         8 * 60 * 60 * 1000,   // 8h to hit TP/SL
+};

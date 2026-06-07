@@ -1,5 +1,7 @@
 // Alert delivery. Sends to Telegram when configured, otherwise prints to console.
-import type { Signal } from "./types.js";
+// Supports optional chart image attachment (PNG buffer) and outcome notifications.
+import type { Signal, OutcomeStatus } from "./types.js";
+import type { OutcomeRow } from "./db/accumulate.js";
 import type { Env } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -38,14 +40,82 @@ export function formatAlert(signal: Signal): string {
   ].join("\n");
 }
 
+// ── Outcome formatting ──────────────────────────────────────────────────────
+
+const OUTCOME_EMOJI: Record<string, string> = {
+  TP_HIT: "✅",
+  SL_HIT: "❌",
+  EXPIRED: "⏰",
+};
+
+function formatDuration(ms: number): string {
+  const totalMin = Math.floor(ms / 60_000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h === 0) return `${m}m`;
+  return `${h}h ${m}m`;
+}
+
+function formatPricePct(entry: number, exit: number, direction: string): string {
+  const pct = direction === "long"
+    ? ((exit - entry) / entry) * 100
+    : ((entry - exit) / entry) * 100;
+  const sign = pct >= 0 ? "+" : "";
+  return `${sign}${pct.toFixed(2)}%`;
+}
+
+export function formatOutcome(
+  outcome: OutcomeRow,
+  status: OutcomeStatus,
+  hitPrice: number | null,
+  closedAt: Date,
+): string {
+  const emoji = OUTCOME_EMOJI[status] ?? "📊";
+  const dir = outcome.direction.toUpperCase();
+  const duration = formatDuration(closedAt.getTime() - new Date(outcome.opened_at).getTime());
+  const pctStr = hitPrice !== null
+    ? ` · ${formatPricePct(outcome.entry_price, hitPrice, outcome.direction)}`
+    : "";
+
+  return [
+    `${emoji} ${outcome.symbol} ${dir} · ${status.replace("_", " ")}${pctStr}`,
+    `Strategy: ${outcome.strategy} · Duration: ${duration}`,
+    `Entry: ${outcome.entry_price}`,
+    hitPrice !== null ? `Exit: ${hitPrice}` : null,
+    `SL: ${outcome.sl}   TP: ${outcome.tp}`,
+  ].filter(Boolean).join("\n");
+}
+
+// ── Notifier interface ──────────────────────────────────────────────────────
+
 export interface Notifier {
-  send(signal: Signal): Promise<void>;
+  send(signal: Signal, chartPng?: Buffer | null): Promise<void>;
+  sendOutcome(
+    outcome: OutcomeRow,
+    status: OutcomeStatus,
+    hitPrice: number | null,
+    closedAt: Date,
+  ): Promise<void>;
 }
 
 class ConsoleNotifier implements Notifier {
-  async send(signal: Signal): Promise<void> {
+  async send(signal: Signal, chartPng?: Buffer | null): Promise<void> {
     console.log("\n" + "─".repeat(48));
     console.log(formatAlert(signal));
+    if (chartPng) {
+      console.log(`[chart: ${chartPng.byteLength} bytes PNG attached]`);
+    }
+    console.log("─".repeat(48) + "\n");
+  }
+
+  async sendOutcome(
+    outcome: OutcomeRow,
+    status: OutcomeStatus,
+    hitPrice: number | null,
+    closedAt: Date,
+  ): Promise<void> {
+    console.log("\n" + "─".repeat(48));
+    console.log(formatOutcome(outcome, status, hitPrice, closedAt));
     console.log("─".repeat(48) + "\n");
   }
 }
@@ -53,9 +123,38 @@ class ConsoleNotifier implements Notifier {
 class TelegramNotifier implements Notifier {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(private bot: any, private chatId: string) {}
-  async send(signal: Signal): Promise<void> {
-    await this.bot.api.sendMessage(this.chatId, formatAlert(signal));
-    logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} to Telegram`);
+
+  async send(signal: Signal, chartPng?: Buffer | null): Promise<void> {
+    const caption = formatAlert(signal);
+
+    if (chartPng) {
+      try {
+        // grammy's InputFile accepts a Buffer directly
+        const { InputFile } = await import("grammy");
+        await this.bot.api.sendPhoto(this.chatId, new InputFile(chartPng, "chart.png"), {
+          caption,
+        });
+        logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} chart to Telegram`);
+        return;
+      } catch (err) {
+        logger.warn(`[notify] sendPhoto failed (${(err as Error).message}), falling back to text`);
+      }
+    }
+
+    // Fallback: text-only message
+    await this.bot.api.sendMessage(this.chatId, caption);
+    logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} to Telegram (text only)`);
+  }
+
+  async sendOutcome(
+    outcome: OutcomeRow,
+    status: OutcomeStatus,
+    hitPrice: number | null,
+    closedAt: Date,
+  ): Promise<void> {
+    const text = formatOutcome(outcome, status, hitPrice, closedAt);
+    await this.bot.api.sendMessage(this.chatId, text);
+    logger.info(`[notify] Sent outcome ${status} for ${outcome.symbol} to Telegram`);
   }
 }
 

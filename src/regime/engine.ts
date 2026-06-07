@@ -12,7 +12,7 @@ const ALLOWED: Record<RegimeResult["regime"], StrategyKind[]> = {
   low_volatility: [],
 };
 
-export function classifyRegime(candles15m: Candle[], rules: Rules["regime"]): RegimeResult {
+export function classifyRegime(candles15m: Candle[], rules: Rules["regime"], atrHistory?: number[]): RegimeResult {
   const closes = candles15m.map((c) => c.close);
   const adxVal = adx(candles15m, rules.adx_period);
   const emaFast = ema(closes, rules.ema_fast);
@@ -21,7 +21,9 @@ export function classifyRegime(candles15m: Candle[], rules: Rules["regime"]): Re
 
   // ATR percentile vs its own recent history (proxy for the 30d window).
   const atrNow = atr(candles15m, rules.atr_period);
-  const atrHist = atrSeries(candles15m, rules.atr_period).filter(Number.isFinite);
+  const atrHist = atrHistory && atrHistory.length >= 50
+    ? atrHistory
+    : atrSeries(candles15m, rules.atr_period).filter(Number.isFinite);
   const atrPct = percentileRank(atrNow, atrHist);
 
   let regime: RegimeResult["regime"];
