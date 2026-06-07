@@ -11,11 +11,14 @@
 # come back healthy, so the pipeline goes red.
 set -euo pipefail
 
-# ── 0. Put pnpm/node/pm2 on PATH ──────────────────────────────────────────────
+# ── 0. Environment for non-interactive shells ─────────────────────────────────
 # Over SSH / in CI this runs in a NON-interactive shell, where ~/.bashrc usually
 # early-returns before its PATH setup — so pnpm installed via the standalone
 # script, nvm, or corepack isn't found. Re-create that PATH here so the script
 # behaves like an interactive login (and so manual runs work too).
+# CI=true also lets pnpm run non-interactively (e.g. reinstall node_modules
+# without prompting for a TTY).
+export CI="${CI:-true}"
 export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 # shellcheck disable=SC1091
