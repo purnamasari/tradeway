@@ -45,6 +45,9 @@ jobs:
           script_stop: true
           script: |
             set -e
+            # SSH doesn't inherit the runner's CI var; pnpm needs it to run
+            # non-interactively (e.g. to wipe/reinstall node_modules without a TTY).
+            export CI=true
             export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
             export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
             [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
