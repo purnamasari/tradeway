@@ -103,6 +103,12 @@ engine (`src/analytics/`), surfaced three ways:
 - **Telegram digest** — a scheduled compact summary (weekly by default; see
   `analytics.digest_every_hours`), pushed via the notifier.
 - **HTTP** — `GET /analytics?days=N` on the health server returns the report as JSON.
+- **Telegram commands** — in loop mode the bot also *listens* for `/analytics [days]`
+  (digest on demand) and `/status` (current open signals). Commands are accepted only
+  from the configured `TELEGRAM_CHAT_ID`. Long-polling runs in the one loop-mode process,
+  so don't run a second loop-mode instance against the same bot token while it's live —
+  Telegram allows only one `getUpdates` poller per bot. (Send-only scripts like
+  `pnpm test:telegram` don't poll, so they're fine.)
 
 Metrics: overall + per-strategy/direction/symbol/regime win-rate and durations;
 **confidence calibration** (actual win-rate per `original_confidence` bucket);
