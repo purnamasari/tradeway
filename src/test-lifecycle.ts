@@ -34,15 +34,20 @@ function snap(over: Partial<EdgeSnapshot> = {}): EdgeSnapshot {
   };
 }
 
+// Build an original baseline; defaults to a healthy bullish long with clean structure.
+function mkOriginal(over: Partial<EdgeOriginal> = {}): EdgeOriginal {
+  return { confidence: 90, funding_percentile: 96, oi_zscore: -3.4, trend: "bullish", structure_intact: true, direction: "long", ...over };
+}
+
 async function main() {
   const rules = loadRules();
   const lc = rules.lifecycle;
-  const original: EdgeOriginal = { confidence: 90, funding_percentile: 96, oi_zscore: -3.4 };
+  const original = mkOriginal();
 
   console.log("── classifyEdgeState ladder ───────────────────────────────");
   expect("healthy → ACTIVE", classifyEdgeState(original, snap({ confidence: 84 }), lc).state, "ACTIVE");
   expect(
-    "one soft failure (structure) → EDGE_WEAKENING",
+    "one regression (structure intact→broken) → EDGE_WEAKENING",
     classifyEdgeState(original, snap({ structure_intact: false }), lc).state,
     "EDGE_WEAKENING",
   );
@@ -52,14 +57,40 @@ async function main() {
     "EDGE_WEAKENING",
   );
   expect(
-    "two soft failures (structure + trend) → INVALIDATED",
-    classifyEdgeState(original, snap({ structure_intact: false, trend_aligned: false }), lc).state,
+    "structure broken + trend REVERSED → INVALIDATED",
+    classifyEdgeState(original, snap({ structure_intact: false, trend: "bearish", trend_aligned: false }), lc).state,
     "INVALIDATED",
   );
   expect(
     "critical confidence collapse alone → INVALIDATED",
     classifyEdgeState(original, snap({ confidence: lc.invalidate_confidence_floor - 5 }), lc).state,
     "INVALIDATED",
+  );
+
+  console.log("── regression-only (the false-positive bug) ───────────────");
+  // Trend drifting to NEUTRAL (not reversed) is not a failure.
+  expect(
+    "bullish→neutral trend drift → ACTIVE (not a reversal)",
+    classifyEdgeState(original, snap({ trend: "neutral", trend_aligned: false }), lc).state,
+    "ACTIVE",
+  );
+  // Counter-trend signal (e.g. squeeze) whose original trend was never aligned.
+  expect(
+    "originally-neutral trend stays neutral → ACTIVE (no false 'trend lost')",
+    classifyEdgeState(mkOriginal({ trend: "neutral" }), snap({ trend: "neutral", trend_aligned: false }), lc).state,
+    "ACTIVE",
+  );
+  // Structure was already imperfect at creation; still imperfect ≠ regression.
+  expect(
+    "structure imperfect at origin, still imperfect → ACTIVE (no regression)",
+    classifyEdgeState(mkOriginal({ structure_intact: false }), snap({ structure_intact: false }), lc).state,
+    "ACTIVE",
+  );
+  // The exact reported case: confidence unchanged, trend neutral, structure not a regression.
+  expect(
+    "reported case (conf 90→90, neutral trend, no structure regression) → ACTIVE",
+    classifyEdgeState(mkOriginal({ structure_intact: false }), snap({ confidence: 90, trend: "neutral", trend_aligned: false, structure_intact: false }), lc).state,
+    "ACTIVE",
   );
 
   console.log("\n── computeEdgeSnapshot against mock (sweep) ───────────────");
@@ -73,7 +104,7 @@ async function main() {
   console.log(JSON.stringify(live, null, 2));
 
   console.log("\n── formatted messages ─────────────────────────────────────");
-  const weakening = classifyEdgeState(original, snap({ confidence: 71, funding_percentile: 80 }), lc);
+  const weakening = classifyEdgeState(original, snap({ confidence: 66 }), lc);
   const wkUpdate: SignalUpdate = {
     symbol: "SOLUSDT", direction: "short", strategy: "liquidity_sweep", edgeState: weakening.state,
     original: { confidence: 93, funding_percentile: 99, oi_zscore: -3.4 },
