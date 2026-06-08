@@ -43,8 +43,21 @@ export async function createCache(redisUrl?: string): Promise<Cache> {
   }
   try {
     const { default: Redis } = await import("ioredis");
-    const client = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
-    await client.connect();
+    // Bounded connect: cap the socket timeout and stop retrying after a few tries
+    // so an unreachable Redis rejects in seconds instead of hanging boot forever
+    // (retryStrategy returning null ends reconnection and rejects connect()).
+    const client = new Redis(redisUrl, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 2,
+      connectTimeout: 5000,
+      retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 1000)),
+    });
+    try {
+      await client.connect();
+    } catch (err) {
+      client.disconnect(); // stop background reconnection before falling back
+      throw err;
+    }
     logger.info("[cache] Connected to Redis");
     return new RedisCache(client);
   } catch (err) {
