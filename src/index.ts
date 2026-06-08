@@ -15,8 +15,9 @@ import { monitorEdges } from "./lifecycle/monitor.js";
 import { fetchTicker } from "./data/bybit.js";
 import { MarketFeed } from "./data/ws-feed.js";
 import { startScheduler, type PeriodicTask } from "./queue/scheduler.js";
+import { buildAnalyticsReport, formatReportText, formatDigest } from "./analytics/report.js";
 import { logger } from "./logger.js";
-import { startHealthServer } from "./health.js";
+import { startHealthServer, setAnalyticsProvider } from "./health.js";
 import { readFileSync } from "node:fs";
 import type { MockScenario } from "./types.js";
 
@@ -52,10 +53,19 @@ function parseMockScenario(): MockScenario {
   return val;
 }
 
+/** Parse `--days=N`, falling back to the configured default. */
+function parseDaysArg(fallback: number): number {
+  const arg = process.argv.find((a) => a.startsWith("--days="));
+  if (!arg) return fallback;
+  const n = Number(arg.split("=")[1]);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 async function main() {
   const once = process.argv.includes("--once");
   const mock = process.argv.includes("--mock");
   const backfillOnly = process.argv.includes("--backfill");
+  const analyticsOnly = process.argv.includes("--analytics");
   const mockScenario = mock ? parseMockScenario() : "sweep";
   const watchlist = loadWatchlist();
   const rules = loadRules();
@@ -98,7 +108,7 @@ async function main() {
   // from config (env), not the live clients, so they're known this early. One-shot
   // modes (--once/--backfill) exit on their own and need no health server.
   const info = buildInfo();
-  if (!once && !backfillOnly && env.healthPort > 0) {
+  if (!once && !backfillOnly && !analyticsOnly && env.healthPort > 0) {
     const maxIntervalMs = Math.max(...enabled.map((a) => a.scan_interval)) * 60_000;
     startHealthServer(
       {
@@ -116,6 +126,7 @@ async function main() {
         feedStatus: useWs
           ? () => (feed ? feed.health() : { connected: true, symbols: [] })
           : undefined,
+        analyticsDefaultDays: rules.analytics.default_window_days,
       },
       env.healthPort,
       env.healthHost,
@@ -129,6 +140,22 @@ async function main() {
   const cache = await createCache(env.redisUrl);
   const db = await createDb(env.databaseUrl);
   const notifier = await createNotifier(env);
+
+  // Expose analytics over GET /analytics once the DB is available.
+  if (db) setAnalyticsProvider((days) => buildAnalyticsReport(db, days));
+
+  // ── Analytics report (`--analytics [--days=N]`): print and exit. ──────────
+  if (analyticsOnly) {
+    if (!db) {
+      logger.error("[boot] --analytics requires DATABASE_URL");
+      process.exit(1);
+    }
+    const days = parseDaysArg(rules.analytics.default_window_days);
+    const report = await buildAnalyticsReport(db, days);
+    console.log(formatReportText(report));
+    // The Postgres pool keeps the event loop alive; this is a one-shot report, so exit.
+    process.exit(0);
+  }
 
   // ── Manual one-time backfill (`--backfill`): force a full run, then exit. ──
   if (backfillOnly) {
@@ -274,6 +301,17 @@ async function main() {
       everyMs: 24 * 60 * 60 * 1000,
       run: () => runRetentionCleanup(database, rules),
     });
+    // Scheduled analytics digest to Telegram/console (weekly by default; 0 disables).
+    if (rules.analytics.digest_every_hours > 0) {
+      tasks.push({
+        name: "digest",
+        everyMs: rules.analytics.digest_every_hours * 60 * 60 * 1000,
+        run: async () => {
+          const report = await buildAnalyticsReport(database, rules.analytics.digest_window_days);
+          await notifier.sendDigest(formatDigest(report));
+        },
+      });
+    }
   }
 
   const scheduler = await startScheduler(env.redisUrl, tasks);

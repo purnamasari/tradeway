@@ -94,6 +94,24 @@ A signal is **stateful** after publication. Each `signal_outcomes` row tracks tw
 
 Verify the edge state machine + message formatting offline (no DB) with `pnpm test:lifecycle`.
 
+### Outcome & edge analytics
+
+The accumulated lifecycle data is turned into performance insight by one read-only query
+engine (`src/analytics/`), surfaced three ways:
+
+- **CLI** — `pnpm analytics` (add `-- --days=N`, `0` = all-time) prints a full report.
+- **Telegram digest** — a scheduled compact summary (weekly by default; see
+  `analytics.digest_every_hours`), pushed via the notifier.
+- **HTTP** — `GET /analytics?days=N` on the health server returns the report as JSON.
+
+Metrics: overall + per-strategy/direction/symbol/regime win-rate and durations;
+**confidence calibration** (actual win-rate per `original_confidence` bucket);
+**edge-monitor validation** (win-rate by terminal edge state + confidence decay in winners
+vs losers); and **factor effectiveness** (funding/OI in winners vs losers). All windows
+filter on `opened_at`; win-rate counts only resolved (`TP_HIT`/`SL_HIT`) outcomes.
+
+Validate the formatters offline (no DB) with `pnpm test:analytics`.
+
 ## Quick start
 
 ```bash
@@ -113,6 +131,10 @@ pnpm scan:once -- --mock --mock-scenario=squeeze
 
 # Continuous loop — per-asset interval from watchlist.yaml
 pnpm scan
+
+# Performance analytics report (requires DATABASE_URL)
+pnpm analytics                 # default window (30d)
+pnpm analytics -- --days=0     # all-time
 
 # Verbose decision logging
 LOG_LEVEL=debug pnpm scan:once
@@ -141,7 +163,7 @@ Postgres) so tests are fully isolated and deterministic.
   per-symbol confidence overrides, global gates (min confidence/quality/RR,
   cooldown).
 - `config/rules.yaml` — regime thresholds, trend tiers, scoring weights, signal
-  lifecycle thresholds (`lifecycle:`), retention policy.
+  lifecycle thresholds (`lifecycle:`), analytics/digest cadence (`analytics:`), retention policy.
 - `.env` (optional, copy from `.env.example`) — enables enhancement layers:
   - `GEMINI_API_KEY` → AI trend classifier (else EMA/ADX fallback)
   - `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` → Telegram alerts (else console)
@@ -284,6 +306,13 @@ memory, version, and the deployed git commit:
 curl -s localhost:3000/health | jq
 ```
 
+The same server also exposes `GET /analytics?days=N` (the performance report as JSON;
+`503` when no database is configured):
+
+```bash
+curl -s 'localhost:3000/analytics?days=30' | jq
+```
+
 Bound to loopback by default — expose it through a reverse proxy or SSH tunnel for
 an external uptime monitor (UptimeRobot, BetterStack, etc.).
 
@@ -331,6 +360,9 @@ src/
   lifecycle/
     edge.ts                 edge recompute (computeEdgeSnapshot) + conservative classifyEdgeState
     monitor.ts              edge lifecycle monitor: live scores, edge state, throttled Telegram updates
+  analytics/
+    queries.ts              read-only win-rate / calibration / edge-validation / factor aggregations
+    report.ts               assembles AnalyticsReport + text (CLI) and digest (Telegram) formatters
   regime/engine.ts          rule-based regime classifier
   ai/trend-classifier.ts    3-tier trend classifier (Gemini → fallback)
   strategy/
