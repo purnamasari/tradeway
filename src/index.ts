@@ -4,11 +4,11 @@
 import { loadWatchlist, loadRules, loadEnv } from "./config.js";
 import { createCache } from "./cache.js";
 import { createDb } from "./db/index.js";
-import { createNotifier } from "./notify.js";
+import { createNotifier, formatStatus } from "./notify.js";
 import { scanSymbol, type ScannerDeps, type ContextProvider } from "./scanner.js";
 import { buildMarketContext } from "./data/market.js";
 import { buildMockContext } from "./data/mock.js";
-import { runRetentionCleanup } from "./db/accumulate.js";
+import { runRetentionCleanup, fetchOpenOutcomes } from "./db/accumulate.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
@@ -312,6 +312,16 @@ async function main() {
         },
       });
     }
+
+    // Inbound Telegram commands (no-op on the console notifier). Replies are built
+    // from the DB here so notify.ts stays free of db/analytics imports.
+    notifier.startCommands({
+      analytics: async (days) => {
+        const report = await buildAnalyticsReport(database, days ?? rules.analytics.default_window_days);
+        return formatDigest(report);
+      },
+      status: async () => formatStatus(await fetchOpenOutcomes(database)),
+    });
   }
 
   const scheduler = await startScheduler(env.redisUrl, tasks);
@@ -320,6 +330,7 @@ async function main() {
   const shutdown = (signal: string) => {
     logger.info(`[boot] ${signal} — shutting down`);
     void scheduler.stop();
+    void notifier.stopCommands();
     feed?.stop();
     const done = () => process.exit(0);
     if (env.opsAlerts) {

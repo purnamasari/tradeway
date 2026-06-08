@@ -150,6 +150,38 @@ export interface Notifier {
    * the process it is trying to report on.
    */
   sendOps(text: string): Promise<void>;
+  /**
+   * Begin listening for inbound chat commands (Telegram long-polling). No-op for
+   * the console notifier. Safe to call once, in loop mode only.
+   */
+  startCommands(handlers: CommandHandlers): void;
+  /** Stop the inbound command listener (graceful shutdown). */
+  stopCommands(): Promise<void>;
+}
+
+/** Callbacks the command listener invokes to build replies — keeps notify.ts free
+ *  of db/analytics imports. Each returns a ready-to-send message string. */
+export interface CommandHandlers {
+  /** `/analytics [days]` — performance report (digest). */
+  analytics: (days?: number) => Promise<string>;
+  /** `/status` — current open signals. */
+  status: () => Promise<string>;
+}
+
+// ── Open-signals status formatting (for /status) ────────────────────────────
+
+export function formatStatus(rows: OutcomeRow[]): string {
+  if (rows.length === 0) return "📡 No open signals.";
+  const lines = [`📡 Open signals (${rows.length}):`, ""];
+  for (const o of rows) {
+    const conf =
+      o.live_confidence != null
+        ? `${o.original_confidence ?? "?"}→${o.live_confidence}`
+        : `${o.original_confidence ?? "?"}`;
+    lines.push(`${o.symbol} ${o.direction.toUpperCase()} · ${o.strategy}`);
+    lines.push(`  ${o.status} · edge ${o.edge_state} · conf ${conf}`);
+  }
+  return lines.join("\n");
 }
 
 class ConsoleNotifier implements Notifier {
@@ -187,6 +219,14 @@ class ConsoleNotifier implements Notifier {
 
   async sendOps(text: string): Promise<void> {
     logger.info(`[ops] ${text}`);
+  }
+
+  startCommands(): void {
+    logger.debug("[notify] console notifier — inbound commands unavailable");
+  }
+
+  async stopCommands(): Promise<void> {
+    // no-op
   }
 }
 
@@ -244,6 +284,64 @@ class TelegramNotifier implements Notifier {
       await this.bot.api.sendMessage(this.chatId, text);
     } catch (err) {
       logger.warn(`[ops] Telegram ops alert failed: ${(err as Error).message}`);
+    }
+  }
+
+  private commandsStarted = false;
+
+  startCommands(handlers: CommandHandlers): void {
+    if (this.commandsStarted) return;
+    const chatId = this.chatId;
+    // Only respond in the configured chat — the bot is otherwise discoverable and
+    // anyone could pull stats. Mismatched chats are silently ignored.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const authorized = (ctx: any) => String(ctx.chat?.id) === chatId;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.command("analytics", async (ctx: any) => {
+      if (!authorized(ctx)) return;
+      try {
+        const n = Number.parseInt(String(ctx.match ?? "").trim(), 10);
+        await ctx.reply(await handlers.analytics(Number.isFinite(n) ? n : undefined));
+      } catch (err) {
+        await ctx.reply(`⚠ analytics failed: ${(err as Error).message}`);
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.command("status", async (ctx: any) => {
+      if (!authorized(ctx)) return;
+      try {
+        await ctx.reply(await handlers.status());
+      } catch (err) {
+        await ctx.reply(`⚠ status failed: ${(err as Error).message}`);
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.catch((err: any) => logger.warn(`[notify] bot error: ${err?.message ?? err}`));
+
+    // Advertise the commands in the Telegram UI (best-effort).
+    this.bot.api
+      .setMyCommands([
+        { command: "analytics", description: "performance report (optional: days, e.g. /analytics 7)" },
+        { command: "status", description: "current open signals" },
+      ])
+      .catch(() => {});
+
+    // Long-poll in the background. Resolves only on stop, so don't await it.
+    void this.bot.start({
+      onStart: () => logger.info("[notify] Telegram command listener started (/analytics, /status)"),
+    });
+    this.commandsStarted = true;
+  }
+
+  async stopCommands(): Promise<void> {
+    if (!this.commandsStarted) return;
+    try {
+      await this.bot.stop();
+    } catch (err) {
+      logger.warn(`[notify] bot stop failed: ${(err as Error).message}`);
     }
   }
 }
