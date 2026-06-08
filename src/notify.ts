@@ -132,8 +132,18 @@ export function formatOutcome(
 
 // ── Notifier interface ──────────────────────────────────────────────────────
 
+/** Options for an outgoing signal alert. */
+export interface SendOptions {
+  /** DB id of the recorded signal — embedded in Follow/Skip callback data. */
+  signalId?: number;
+  /** Attach Follow/Skip buttons (interactive notifiers only). */
+  followable?: boolean;
+}
+
 export interface Notifier {
-  send(signal: Signal, chartPng?: Buffer | null): Promise<void>;
+  /** True if the channel supports inbound interaction (buttons/commands). */
+  readonly interactive: boolean;
+  send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<void>;
   sendOutcome(
     outcome: OutcomeRow,
     status: OutcomeStatus,
@@ -166,6 +176,12 @@ export interface CommandHandlers {
   analytics: (days?: number) => Promise<string>;
   /** `/status` — current open signals. */
   status: () => Promise<string>;
+  /** `/scan SYMBOL` — force a scan; returns the result summary. */
+  scan: (symbol: string) => Promise<string>;
+  /** Follow button — activate (track) the signal; returns a confirmation. */
+  onFollow: (signalId: number) => Promise<string>;
+  /** Skip button — dismiss/shadow the signal; returns a confirmation. */
+  onSkip: (signalId: number) => Promise<string>;
 }
 
 // ── Open-signals status formatting (for /status) ────────────────────────────
@@ -185,6 +201,8 @@ export function formatStatus(rows: OutcomeRow[]): string {
 }
 
 class ConsoleNotifier implements Notifier {
+  readonly interactive = false;
+
   async send(signal: Signal, chartPng?: Buffer | null): Promise<void> {
     console.log("\n" + "─".repeat(48));
     console.log(formatAlert(signal));
@@ -231,11 +249,23 @@ class ConsoleNotifier implements Notifier {
 }
 
 class TelegramNotifier implements Notifier {
+  readonly interactive = true;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(private bot: any, private chatId: string) {}
 
-  async send(signal: Signal, chartPng?: Buffer | null): Promise<void> {
+  /** Build the Follow/Skip inline keyboard for a followable signal, else undefined. */
+  private async followKeyboard(opts?: SendOptions) {
+    if (!opts?.followable || opts.signalId == null) return undefined;
+    const { InlineKeyboard } = await import("grammy");
+    return new InlineKeyboard()
+      .text("✅ Follow", `follow:${opts.signalId}`)
+      .text("⏭ Skip", `skip:${opts.signalId}`);
+  }
+
+  async send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<void> {
     const caption = formatAlert(signal);
+    const reply_markup = await this.followKeyboard(opts);
 
     if (chartPng) {
       try {
@@ -243,6 +273,7 @@ class TelegramNotifier implements Notifier {
         const { InputFile } = await import("grammy");
         await this.bot.api.sendPhoto(this.chatId, new InputFile(chartPng, "chart.png"), {
           caption,
+          reply_markup,
         });
         logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} chart to Telegram`);
         return;
@@ -252,7 +283,7 @@ class TelegramNotifier implements Notifier {
     }
 
     // Fallback: text-only message
-    await this.bot.api.sendMessage(this.chatId, caption);
+    await this.bot.api.sendMessage(this.chatId, caption, { reply_markup });
     logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} to Telegram (text only)`);
   }
 
@@ -319,6 +350,44 @@ class TelegramNotifier implements Notifier {
     });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.command("scan", async (ctx: any) => {
+      if (!authorized(ctx)) return;
+      const symbol = String(ctx.match ?? "").trim().toUpperCase();
+      if (!symbol) {
+        await ctx.reply("Usage: /scan SYMBOL (e.g. /scan ZECUSDT)");
+        return;
+      }
+      try {
+        await ctx.reply(`⏳ Scanning ${symbol}…`);
+        await ctx.reply(await handlers.scan(symbol));
+      } catch (err) {
+        await ctx.reply(`⚠ scan failed: ${(err as Error).message}`);
+      }
+    });
+
+    // Follow/Skip buttons on signal alerts. The callback data carries the signal id.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handleAction = async (ctx: any, action: (id: number) => Promise<string>) => {
+      if (!authorized(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      const id = Number(ctx.match?.[1]);
+      try {
+        const reply = await action(id);
+        await ctx.answerCallbackQuery({ text: reply });
+        // Clear the buttons so the decision can't be re-pressed.
+        await ctx.editMessageReplyMarkup().catch(() => {});
+      } catch (err) {
+        await ctx.answerCallbackQuery({ text: `error: ${(err as Error).message}` });
+      }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.callbackQuery(/^follow:(\d+)$/, (ctx: any) => handleAction(ctx, handlers.onFollow));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.callbackQuery(/^skip:(\d+)$/, (ctx: any) => handleAction(ctx, handlers.onSkip));
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.catch((err: any) => logger.warn(`[notify] bot error: ${err?.message ?? err}`));
 
     // Advertise the commands in the Telegram UI (best-effort).
@@ -326,6 +395,7 @@ class TelegramNotifier implements Notifier {
       .setMyCommands([
         { command: "analytics", description: "performance report (optional: days, e.g. /analytics 7)" },
         { command: "status", description: "current open signals" },
+        { command: "scan", description: "force a scan, e.g. /scan ZECUSDT" },
       ])
       .catch(() => {});
 

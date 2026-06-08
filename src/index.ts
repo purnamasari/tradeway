@@ -1,14 +1,21 @@
 // Entry point. Loads config, wires dependencies, and runs the scanner either
 // once (--once) or on a per-asset interval loop.
 // In loop mode with DB: also runs a 1-minute outcome evaluator.
-import { loadWatchlist, loadRules, loadEnv } from "./config.js";
+import { loadWatchlist, loadRules, loadEnv, type AssetConfig } from "./config.js";
 import { createCache } from "./cache.js";
 import { createDb } from "./db/index.js";
 import { createNotifier, formatStatus } from "./notify.js";
 import { scanSymbol, type ScannerDeps, type ContextProvider } from "./scanner.js";
 import { buildMarketContext } from "./data/market.js";
 import { buildMockContext } from "./data/mock.js";
-import { runRetentionCleanup, fetchOpenOutcomes } from "./db/accumulate.js";
+import {
+  runRetentionCleanup,
+  fetchOpenOutcomes,
+  fetchSignalById,
+  setSignalDecision,
+  createOutcome,
+  fetchOpenOutcomeForSymbol,
+} from "./db/accumulate.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
@@ -246,7 +253,9 @@ async function main() {
       everyMs: asset.scan_interval * 60_000,
       runAtBoot: true,
       jitterMs: 10_000,
-      run: () => scanSymbol(asset, deps),
+      run: async () => {
+        await scanSymbol(asset, deps);
+      },
     });
   }
 
@@ -320,7 +329,31 @@ async function main() {
         const report = await buildAnalyticsReport(database, days ?? rules.analytics.default_window_days);
         return formatDigest(report);
       },
-      status: async () => formatStatus(await fetchOpenOutcomes(database)),
+      status: async () => formatStatus(await fetchOpenOutcomes(database, { followedOnly: true })),
+      scan: async (symbol) => {
+        const asset: AssetConfig =
+          enabled.find((a) => a.symbol === symbol) ??
+          watchlist.assets.find((a) => a.symbol === symbol) ??
+          { symbol, enabled: true, scan_interval: 0, asset_class: "manual" };
+        return scanSymbol(asset, deps);
+      },
+      onFollow: async (signalId) => {
+        if (!(await setSignalDecision(database, signalId, "followed"))) return "Already decided.";
+        const signal = await fetchSignalById(database, signalId);
+        if (!signal) return "Signal not found.";
+        if (await fetchOpenOutcomeForSymbol(database, signal.symbol)) {
+          return `Already an active signal for ${signal.symbol}.`;
+        }
+        await createOutcome(database, signal, signalId, true);
+        return `✅ Following ${signal.symbol} ${signal.direction.toUpperCase()} ${signal.strategy}`;
+      },
+      onSkip: async (signalId) => {
+        if (!(await setSignalDecision(database, signalId, "skipped"))) return "Already decided.";
+        const signal = await fetchSignalById(database, signalId);
+        if (!signal) return "Skipped.";
+        await createOutcome(database, signal, signalId, false); // shadow outcome
+        return `⏭ Skipped ${signal.symbol} ${signal.direction.toUpperCase()}`;
+      },
     });
   }
 

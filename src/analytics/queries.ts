@@ -8,20 +8,23 @@
 //    numbers (bigint/numeric would otherwise come back as strings).
 import type { Db } from "../db/index.js";
 import { signalOutcomes } from "../db/schema.js";
-import { and, gte, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, sql, type SQL } from "drizzle-orm";
 
-/** Window predicate on opened_at, or undefined for all-time. */
-function windowFilter(days: number): SQL | undefined {
-  if (days <= 0) return undefined;
+/**
+ * Real-trades-and-in-window predicate. Always excludes shadow outcomes
+ * (`followed = false`, created on Skip) so they never pollute performance metrics;
+ * their counterfactual analysis is a separate, future view.
+ */
+function realFilter(days: number): SQL {
+  const followed = eq(signalOutcomes.followed, true);
+  if (days <= 0) return followed;
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  return gte(signalOutcomes.opened_at, cutoff);
+  return and(followed, gte(signalOutcomes.opened_at, cutoff)) as SQL;
 }
 
-/** Resolved-and-in-window predicate (for win-rate breakdowns). */
+/** Resolved (TP/SL), real, in-window predicate (for win-rate breakdowns). */
 function resolvedInWindow(days: number): SQL {
-  const resolved = sql`${signalOutcomes.status} in ('TP_HIT','SL_HIT')`;
-  const w = windowFilter(days);
-  return w ? (and(resolved, w) as SQL) : resolved;
+  return and(sql`${signalOutcomes.status} in ('TP_HIT','SL_HIT')`, realFilter(days)) as SQL;
 }
 
 // Reusable aggregate fragments.
@@ -47,7 +50,7 @@ export async function summary(db: NonNullable<Db>, days: number): Promise<Counts
       total: sql<number>`count(*)::int`,
     })
     .from(signalOutcomes)
-    .where(windowFilter(days));
+    .where(realFilter(days));
   return rows[0] ?? { tp: 0, sl: 0, expired: 0, open: 0, total: 0 };
 }
 

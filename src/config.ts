@@ -71,6 +71,7 @@ export interface Rules {
     invalidate_confidence_floor: number; // live confidence at/below → INVALIDATED (critical)
     invalidate_min_failures: number; // # of soft failures required for INVALIDATED
     invalidate_grace_min: number; // no INVALIDATED within this many minutes of creation
+    require_follow: boolean; // signals require a Follow press to be tracked (Telegram only)
     update_confidence_delta: number; // notify if live conf moves >= this since last notify
     update_min_interval_min: number; // min minutes between non-state-change updates
     edge_history_min_delta: number; // append history row when live conf moves >= this
@@ -119,6 +120,7 @@ const LIFECYCLE_DEFAULTS: Rules["lifecycle"] = {
   invalidate_confidence_floor: 35,
   invalidate_min_failures: 2,
   invalidate_grace_min: 5,
+  require_follow: true,
   update_confidence_delta: 15,
   update_min_interval_min: 10,
   edge_history_min_delta: 3,

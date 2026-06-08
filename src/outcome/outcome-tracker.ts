@@ -66,13 +66,17 @@ export async function evaluateOutcomes(
       // records duration_ms for future analytics.
       await closeOutcome(db, outcome.id, result.status, result.hitPrice, now, outcome.opened_at);
       logger.info(
-        `[outcome] ${result.status} #${outcome.id} ${outcome.symbol} ${outcome.direction} ${outcome.strategy}` +
+        `[outcome] ${result.status}${outcome.followed ? "" : " (shadow)"} #${outcome.id} ${outcome.symbol} ${outcome.direction} ${outcome.strategy}` +
           (result.hitPrice !== null ? ` at ${result.hitPrice}` : ""),
       );
-      try {
-        await notifier.sendOutcome(outcome, result.status, result.hitPrice, now);
-      } catch (err) {
-        logger.warn(`[outcome] Notification failed for #${outcome.id}: ${(err as Error).message}`);
+      // Shadow outcomes (Skipped signals) close silently — they exist only for
+      // counterfactual data, not to notify the user.
+      if (outcome.followed) {
+        try {
+          await notifier.sendOutcome(outcome, result.status, result.hitPrice, now);
+        } catch (err) {
+          logger.warn(`[outcome] Notification failed for #${outcome.id}: ${(err as Error).message}`);
+        }
       }
     }
   }
