@@ -1,6 +1,6 @@
 // Drizzle schema — metric_history, signals, regime_log, signal_outcomes tables.
 // All persistence is optional; if DATABASE_URL is not set, these are never used.
-import { pgTable, serial, text, real, timestamp, jsonb, integer, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, real, timestamp, jsonb, integer, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 // ── market_history ────────────────────────────────────────────────────────────
 // Raw historical market data backfilled from Bybit (and the single source of
@@ -119,10 +119,58 @@ export const signalOutcomes = pgTable(
     activated_at: timestamp("activated_at", { withTimezone: true }),
     closed_at: timestamp("closed_at", { withTimezone: true }),
     expires_at: timestamp("expires_at", { withTimezone: true }).notNull(),
+
+    // ── Edge lifecycle (orthogonal to price `status`) ─────────────────────────
+    // Originals are immutable; live_* are recomputed each monitor pass.
+    original_confidence: integer("original_confidence"),
+    original_setup_quality: integer("original_setup_quality"),
+    live_confidence: integer("live_confidence"),
+    live_setup_quality: integer("live_setup_quality"),
+    edge_state: text("edge_state").notNull().default("ACTIVE"),
+    original_factors: jsonb("original_factors"), // funding_percentile, oi_zscore, … at creation
+    live_factors: jsonb("live_factors"), // latest recompute
+    updated_at: timestamp("updated_at", { withTimezone: true }), // touched each monitor pass
+    duration_ms: integer("duration_ms"), // closed_at − opened_at, set on close
+    // Telegram-update throttle bookkeeping.
+    last_update_sent_at: timestamp("last_update_sent_at", { withTimezone: true }),
+    last_notified_confidence: integer("last_notified_confidence"),
+    // signal_edge_updates write-gate bookkeeping (avoid row bloat).
+    last_edge_record_at: timestamp("last_edge_record_at", { withTimezone: true }),
+    last_recorded_confidence: integer("last_recorded_confidence"),
   },
   (t) => [
     index("idx_outcome_status").on(t.status),
     index("idx_outcome_signal_id").on(t.signal_id),
+    index("idx_outcome_symbol_status").on(t.symbol, t.status),
+  ],
+);
+
+// ── signal_edge_updates ───────────────────────────────────────────────────────
+// Edge-evolution time series: one row appended per open outcome when its edge
+// meaningfully changes (state change, confidence delta, or sparse heartbeat). Raw
+// data for analyzing confidence decay and factor evolution — cannot be
+// reconstructed retroactively, so it is captured as it happens.
+export const signalEdgeUpdates = pgTable(
+  "signal_edge_updates",
+  {
+    id: serial("id").primaryKey(),
+    outcome_id: integer("outcome_id").notNull(),
+    signal_id: integer("signal_id").notNull(),
+    symbol: text("symbol").notNull(),
+    recorded_at: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+    edge_state: text("edge_state").notNull(),
+    live_confidence: integer("live_confidence").notNull(),
+    live_setup_quality: integer("live_setup_quality").notNull(),
+    funding_percentile: real("funding_percentile"),
+    oi_zscore: real("oi_zscore"),
+    volume_percentile: real("volume_percentile"),
+    structure_intact: boolean("structure_intact"),
+    trend: text("trend"),
+    trend_aligned: boolean("trend_aligned"),
+    regime_aligned: boolean("regime_aligned"),
+  },
+  (t) => [
+    index("idx_edge_update_outcome_time").on(t.outcome_id, t.recorded_at),
   ],
 );
 

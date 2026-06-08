@@ -34,6 +34,7 @@ Two components answer **different** questions and never override each other:
 | **AI Trend Classifier** | "Which way is 4H momentum going?" | Gemini 2.5 Flash → Flash-Lite → EMA/ADX rule fallback. |
 | **S/R Engine** | "Where are key horizontal support/resistance levels?" | Swing pivots, clustered, strength scored. |
 | **Outcome Evaluator** | "Did active signals hit entry, TP, SL, or expire?" | 1-minute polling of ticker price against active outcomes in DB. |
+| **Edge Monitor** | "Does an active signal's original edge still hold?" | 1-minute recompute of confidence/structure/trend; tracks `ACTIVE → EDGE_WEAKENING → INVALIDATED`. |
 
 A signal needs both to agree (e.g. `regime=ranging` **AND** `trend=bullish` →
 `liquidity_sweep LONG` permitted).
@@ -55,6 +56,43 @@ When multiple detectors fire, the scanner selects the signal with the highest
   volume percentile, regime alignment.
 - **Setup Quality** (0–100) — *technical structure*: S/R level strength, engulf
   body ratio, HTF alignment, sweep wick ratio, structure intact.
+
+### Active signal lifecycle
+
+A signal is **stateful** after publication. Each `signal_outcomes` row tracks two
+**independent** axes:
+
+| Axis | States | Meaning |
+|------|--------|---------|
+| `status` (price) | `PENDING_ENTRY → ACTIVE → TP_HIT \| SL_HIT \| EXPIRED` | did price enter / hit TP/SL / expire (the **Outcome Evaluator**) |
+| `edge_state` (edge) | `ACTIVE → EDGE_WEAKENING → INVALIDATED` | does the original thesis still hold (the **Edge Monitor**) |
+
+- **One active signal per symbol.** While a symbol has an open row
+  (`status IN (PENDING_ENTRY, ACTIVE)`), the scanner **suppresses** new signals for it —
+  you get an *update*, never a duplicate. (DB-less mode has no registry, so the per-strategy
+  cooldown is the fallback dedupe there.)
+- **Every minute**, the edge monitor recomputes confidence, setup quality, funding/OI
+  factors, structure, and trend alignment — storing them as `live_confidence` /
+  `live_setup_quality` / `live_factors`. **Originals are immutable.**
+- **Conservative invalidation**: a single failed condition (trend/regime alignment or
+  structure) is only `EDGE_WEAKENING`. `INVALIDATED` requires ≥2 soft failures **or** a
+  critical one (confidence at/below `lifecycle.invalidate_confidence_floor`). The bot
+  **never auto-closes** — `INVALIDATED` is tracked, and the slot frees only when price resolves.
+- **Telegram updates** (not duplicate signals) fire on edge-state changes or significant
+  confidence moves, throttled by `lifecycle.update_*`:
+  ```
+  ⚠ SOL SHORT UPDATE          ⚠ SOL SHORT INVALIDATED
+  Status: ACTIVE              Reason:
+  Confidence: 93 → 78         - Structure broken
+  Funding: 99% → 92%          - OI z-score reverted
+  OI Z-score: -3.4 → -2.1     Confidence: 93 → 28
+  Trade remains valid.
+  ```
+- **Edge evolution history** is appended to `signal_edge_updates` (write-gated by
+  `lifecycle.edge_history_*` to bound row growth) so confidence decay / factor evolution
+  can be analyzed later. Thresholds live under `lifecycle:` in `config/rules.yaml`.
+
+Verify the edge state machine + message formatting offline (no DB) with `pnpm test:lifecycle`.
 
 ## Quick start
 
@@ -102,8 +140,8 @@ Postgres) so tests are fully isolated and deterministic.
 - `config/watchlist.yaml` — symbols, per-asset scan interval, asset class,
   per-symbol confidence overrides, global gates (min confidence/quality/RR,
   cooldown).
-- `config/rules.yaml` — regime thresholds, trend tiers, scoring weights,
-  retention policy.
+- `config/rules.yaml` — regime thresholds, trend tiers, scoring weights, signal
+  lifecycle thresholds (`lifecycle:`), retention policy.
 - `.env` (optional, copy from `.env.example`) — enables enhancement layers:
   - `GEMINI_API_KEY` → AI trend classifier (else EMA/ADX fallback)
   - `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` → Telegram alerts (else console)
@@ -165,7 +203,9 @@ log (`scheduler=bullmq|interval`).
    pnpm db:push
    ```
 
-   Tables created: `metric_history`, `signals`, `regime_log`, `signal_outcomes`.
+   Tables created: `metric_history`, `signals`, `regime_log`, `signal_outcomes`,
+   `signal_edge_updates`. The lifecycle columns and `signal_edge_updates` are additive,
+   so `pnpm db:push` applies them to an existing database without data loss.
 
 ## Deployment (VPS + PM2 + CI/CD)
 
@@ -283,11 +323,14 @@ src/
     market.ts               assembles per-symbol MarketContext
     mock.ts                 deterministic offline data (sweep + pullback scenarios)
   db/
-    schema.ts               Drizzle schema: metric_history, signals, regime_log, signal_outcomes
+    schema.ts               Drizzle schema: metric_history, signals, regime_log, signal_outcomes, signal_edge_updates
     index.ts                Postgres client (graceful degradation)
     accumulate.ts           recordMetrics, recordSignal, recordRegime, outcomes & retention
   outcome/
-    outcome-tracker.ts      evaluates open outcomes against live tickers every minute
+    outcome-tracker.ts      price lifecycle: evaluates open outcomes against live tickers every minute
+  lifecycle/
+    edge.ts                 edge recompute (computeEdgeSnapshot) + conservative classifyEdgeState
+    monitor.ts              edge lifecycle monitor: live scores, edge state, throttled Telegram updates
   regime/engine.ts          rule-based regime classifier
   ai/trend-classifier.ts    3-tier trend classifier (Gemini → fallback)
   strategy/

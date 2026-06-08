@@ -145,6 +145,36 @@ export interface MarketContext {
 // Mock scenario selector for deterministic offline testing.
 export type MockScenario = "sweep" | "pullback" | "squeeze";
 
+// ── Signal lifecycle: edge health ──────────────────────────────────────────────
+// Orthogonal to the price-based OutcomeStatus below. `status` answers "did price
+// enter / hit TP/SL / expire"; `EdgeState` answers "does the original thesis still
+// hold". Edge state is tracked while a signal is open and never closes a trade.
+export type EdgeState = "ACTIVE" | "EDGE_WEAKENING" | "INVALIDATED";
+
+/** A recompute of a signal's edge from current market data (vs its immutable original). */
+export interface EdgeSnapshot {
+  confidence: number; // 0-100, recomputed market-conditions score
+  setup_quality: number; // 0-100, recomputed structure score
+  funding_percentile: number;
+  oi_zscore: number;
+  volume_percentile: number;
+  structure_intact: boolean;
+  trend: Trend;
+  trend_aligned: boolean; // current trend still agrees with signal direction
+  regime_aligned: boolean; // current regime still permits the signal's strategy
+}
+
+/** Payload for a Telegram/console "signal update" (edge changed, not a new signal). */
+export interface SignalUpdate {
+  symbol: string;
+  direction: Direction;
+  strategy: StrategyKind;
+  edgeState: EdgeState;
+  original: { confidence: number; funding_percentile: number; oi_zscore: number };
+  live: { confidence: number; funding_percentile: number; oi_zscore: number };
+  reasons: string[];
+}
+
 // ── Outcome tracking ─────────────────────────────────────────────────────────
 export type OutcomeStatus = "PENDING_ENTRY" | "ACTIVE" | "TP_HIT" | "SL_HIT" | "EXPIRED";
 

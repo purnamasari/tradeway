@@ -62,8 +62,9 @@ export async function evaluateOutcomes(
         `[outcome] ACTIVATED #${outcome.id} ${outcome.symbol} ${outcome.direction} ${outcome.strategy} at ${price}`,
       );
     } else {
-      // Terminal state: TP_HIT, SL_HIT, or EXPIRED
-      await closeOutcome(db, outcome.id, result.status, result.hitPrice, now);
+      // Terminal state: TP_HIT, SL_HIT, or EXPIRED. Pass opened_at so the close
+      // records duration_ms for future analytics.
+      await closeOutcome(db, outcome.id, result.status, result.hitPrice, now, outcome.opened_at);
       logger.info(
         `[outcome] ${result.status} #${outcome.id} ${outcome.symbol} ${outcome.direction} ${outcome.strategy}` +
           (result.hitPrice !== null ? ` at ${result.hitPrice}` : ""),

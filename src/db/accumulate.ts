@@ -2,13 +2,46 @@
 // building percentile/z-score windows over time.
 // Also handles signal outcome persistence.
 import type { Db } from "./index.js";
-import type { Candle, MarketContext, RegimeResult, TrendResult, Signal, StrategyKind } from "../types.js";
+import type { Candle, MarketContext, RegimeResult, TrendResult, Signal, StrategyKind, EdgeState } from "../types.js";
 import type { Rules } from "../config.js";
 import { ENTRY_TTL } from "../types.js";
-import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes } from "./schema.js";
+import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes, signalEdgeUpdates } from "./schema.js";
 import { atr, adx, ema, atrSeries } from "../indicators.js";
 import { logger } from "../logger.js";
 import { asc, desc, eq, gte, lt, and, sql, inArray, isNotNull } from "drizzle-orm";
+
+/**
+ * Merge backfilled market_history + accumulated metric_history into `ctx`'s
+ * percentile/z-score windows and historyConfidence. Mutates `ctx` in place.
+ * Shared by the scanner and the edge monitor so both score against identical
+ * historical context. No-op when db is null.
+ */
+export async function hydrateContextHistory(
+  db: Db,
+  ctx: MarketContext,
+  rules: Rules,
+): Promise<void> {
+  if (!db) return;
+  const marketHist = await fetchHistoricalContextFromMarketHistory(db, ctx.symbol, {
+    fundingDays: rules.backfill.funding_days,
+    oiDays: rules.backfill.oi_days,
+    candleDays: rules.backfill.percentile_days,
+    atrPeriod: rules.regime.atr_period,
+  });
+  const metricHist = await fetchHistoricalMetricsFromDb(db, ctx.symbol);
+
+  const fundingHistory = [...(marketHist?.fundingHistory ?? []), ...(metricHist?.fundingHistory ?? [])];
+  const oiHistory = [...(marketHist?.oiHistory ?? []), ...(metricHist?.oiHistory ?? [])];
+  const atrHistory = [...(marketHist?.atrHistory ?? []), ...(metricHist?.atrHistory ?? [])];
+  const volumeHistory = [...(marketHist?.volumeHistory ?? []), ...(metricHist?.volumeHistory ?? [])];
+  const recordCount = (marketHist?.recordCount ?? 0) + (metricHist?.recordCount ?? 0);
+
+  ctx.historyConfidence = Math.min(recordCount / 100, 1.0);
+  if (oiHistory.length >= 30) ctx.oiHistory = oiHistory;
+  if (fundingHistory.length >= 50) ctx.fundingHistory = fundingHistory;
+  if (atrHistory.length >= 50) ctx.atrHistory = atrHistory;
+  if (volumeHistory.length >= 50) ctx.volumeHistory = volumeHistory;
+}
 
 
 /**
@@ -117,6 +150,18 @@ export async function createOutcome(
       tp: signal.tp,
       opened_at: now,
       expires_at: expiresAt,
+      // ── Edge lifecycle seed: immutable originals ──────────────────────────
+      original_confidence: signal.confidence,
+      original_setup_quality: signal.setup_quality,
+      edge_state: "ACTIVE",
+      original_factors: {
+        funding_percentile: signal.score_breakdown.funding_percentile,
+        oi_zscore: signal.score_breakdown.oi_zscore,
+        volume_percentile: signal.score_breakdown.volume_percentile,
+        structure_intact: signal.score_breakdown.structure_intact,
+        trend: signal.trend,
+        regime: signal.regime,
+      },
     });
     logger.info(`[outcome] Created PENDING_ENTRY for ${signal.symbol} ${signal.direction} ${signal.strategy} (signal #${signalId})`);
   } catch (err) {
@@ -142,6 +187,30 @@ export interface OutcomeRow {
   activated_at: Date | null;
   closed_at: Date | null;
   expires_at: Date;
+  // Edge lifecycle
+  original_confidence: number | null;
+  original_setup_quality: number | null;
+  live_confidence: number | null;
+  live_setup_quality: number | null;
+  edge_state: string;
+  original_factors: EdgeFactorsSnapshot | null;
+  live_factors: EdgeFactorsSnapshot | null;
+  updated_at: Date | null;
+  duration_ms: number | null;
+  last_update_sent_at: Date | null;
+  last_notified_confidence: number | null;
+  last_edge_record_at: Date | null;
+  last_recorded_confidence: number | null;
+}
+
+/** Shape of the `original_factors` / `live_factors` JSONB blobs. */
+export interface EdgeFactorsSnapshot {
+  funding_percentile?: number;
+  oi_zscore?: number;
+  volume_percentile?: number;
+  structure_intact?: boolean;
+  trend?: string;
+  regime?: string;
 }
 
 /** Fetch all outcomes that need evaluation (PENDING_ENTRY or ACTIVE). */
@@ -181,26 +250,111 @@ export async function activateOutcome(
   }
 }
 
-/** Close an outcome with a terminal status. */
+/**
+ * Close an outcome with a terminal status. `openedAt` is used to record
+ * `duration_ms` (closed_at − opened_at) for future analytics.
+ */
 export async function closeOutcome(
   db: Db,
   outcomeId: number,
   status: "TP_HIT" | "SL_HIT" | "EXPIRED",
   hitPrice: number | null,
   closedAt: Date,
+  openedAt?: Date,
 ): Promise<void> {
   if (!db) return;
   try {
+    const durationMs = openedAt ? closedAt.getTime() - openedAt.getTime() : null;
     await db
       .update(signalOutcomes)
       .set({
         status,
         hit_price: hitPrice,
         closed_at: closedAt,
+        duration_ms: durationMs,
       })
       .where(eq(signalOutcomes.id, outcomeId));
   } catch (err) {
     logger.warn(`[db] closeOutcome failed for #${outcomeId}: ${(err as Error).message}`);
+  }
+}
+
+// ── Edge lifecycle persistence ──────────────────────────────────────────────
+
+/** Fetch the single open (PENDING_ENTRY|ACTIVE) outcome for a symbol, if any. */
+export async function fetchOpenOutcomeForSymbol(
+  db: Db,
+  symbol: string,
+): Promise<OutcomeRow | null> {
+  if (!db) return null;
+  try {
+    const rows = await db
+      .select()
+      .from(signalOutcomes)
+      .where(
+        and(
+          eq(signalOutcomes.symbol, symbol),
+          inArray(signalOutcomes.status, ["PENDING_ENTRY", "ACTIVE"]),
+        ),
+      )
+      .limit(1);
+    return (rows[0] as OutcomeRow) ?? null;
+  } catch (err) {
+    logger.warn(`[db] fetchOpenOutcomeForSymbol failed for ${symbol}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+export interface LiveEdgeUpdate {
+  live_confidence: number;
+  live_setup_quality: number;
+  edge_state: EdgeState;
+  live_factors: EdgeFactorsSnapshot;
+  updated_at: Date;
+  // Optional throttle/bookkeeping fields — only set when the monitor acted.
+  last_update_sent_at?: Date;
+  last_notified_confidence?: number;
+  last_edge_record_at?: Date;
+  last_recorded_confidence?: number;
+}
+
+/** Persist the latest live edge values onto the outcome row. */
+export async function updateLiveEdge(
+  db: Db,
+  outcomeId: number,
+  fields: LiveEdgeUpdate,
+): Promise<void> {
+  if (!db) return;
+  try {
+    await db.update(signalOutcomes).set(fields).where(eq(signalOutcomes.id, outcomeId));
+  } catch (err) {
+    logger.warn(`[db] updateLiveEdge failed for #${outcomeId}: ${(err as Error).message}`);
+  }
+}
+
+export interface EdgeUpdateRow {
+  outcome_id: number;
+  signal_id: number;
+  symbol: string;
+  edge_state: EdgeState;
+  live_confidence: number;
+  live_setup_quality: number;
+  funding_percentile: number | null;
+  oi_zscore: number | null;
+  volume_percentile: number | null;
+  structure_intact: boolean;
+  trend: string;
+  trend_aligned: boolean;
+  regime_aligned: boolean;
+}
+
+/** Append one edge-evolution row (gated by the monitor to bound row growth). */
+export async function recordEdgeUpdate(db: Db, row: EdgeUpdateRow): Promise<void> {
+  if (!db) return;
+  try {
+    await db.insert(signalEdgeUpdates).values(row);
+  } catch (err) {
+    logger.warn(`[db] recordEdgeUpdate failed for outcome #${row.outcome_id}: ${(err as Error).message}`);
   }
 }
 
@@ -430,6 +584,13 @@ export async function runRetentionCleanup(db: Db, rules: Rules): Promise<void> {
       const cutoff = new Date(now.getTime() - regimeDays * 24 * 60 * 60 * 1000);
       await db.delete(regimeLog).where(lt(regimeLog.computed_at, cutoff));
       logger.info(`[retention] Cleaned regime_log older than ${regimeDays} days`);
+    }
+
+    const edgeDays = rules.retention?.edge_updates_days ?? 90;
+    if (edgeDays > 0) {
+      const cutoff = new Date(now.getTime() - edgeDays * 24 * 60 * 60 * 1000);
+      await db.delete(signalEdgeUpdates).where(lt(signalEdgeUpdates.recorded_at, cutoff));
+      logger.info(`[retention] Cleaned signal_edge_updates older than ${edgeDays} days`);
     }
   } catch (err) {
     logger.error(`[retention] Database cleanup failed: ${(err as Error).message}`);
