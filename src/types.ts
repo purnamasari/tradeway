@@ -50,7 +50,7 @@ export interface SRSnapshot {
 }
 
 // ── Strategy / signals ────────────────────────────────────────────────────────
-export type StrategyKind = "liquidity_sweep" | "trend_pullback" | "squeeze";
+export type StrategyKind = "liquidity_sweep" | "trend_pullback" | "squeeze" | "momentum";
 export type Direction = "long" | "short";
 
 export interface ScoreBreakdown {
@@ -199,10 +199,12 @@ export const ENTRY_TTL: Record<StrategyKind, number> = {
   liquidity_sweep: 1 * 60 * 60 * 1000,   // 1h to enter
   trend_pullback:  1 * 60 * 60 * 1000,   // 1h to enter
   squeeze:         30 * 60 * 1000,        // 30m to enter
+  momentum:        30 * 60 * 1000,        // 30m — momentum entries should fill fast
 };
 
 export const OUTCOME_TTL: Record<StrategyKind, number> = {
   liquidity_sweep: 4 * 60 * 60 * 1000,   // 4h to hit TP/SL
   trend_pullback:  6 * 60 * 60 * 1000,   // 6h to hit TP/SL
   squeeze:         8 * 60 * 60 * 1000,   // 8h to hit TP/SL
+  momentum:        4 * 60 * 60 * 1000,   // 4h to hit TP/SL
 };

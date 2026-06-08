@@ -14,8 +14,9 @@ import type {
   TrendResult,
 } from "../types.js";
 import type { Rules } from "../config.js";
-import { ema } from "../indicators.js";
+import { ema, atr } from "../indicators.js";
 import { scoreConfidence, scoreSetupQuality } from "../scoring.js";
+import { widenStopToAtr } from "../risk.js";
 
 const SWEEP_PENETRATION = 0.001; // 0.1% beyond the level counts as a sweep
 const HTF_TOLERANCE = 0.005; // 4H level within 0.5% of 15m level => aligned
@@ -80,10 +81,12 @@ export function detectLiquiditySweep(
   const entry_high = direction === "long" ? entryRef : entryRef + band;
   const entry = (entry_low + entry_high) / 2;
 
-  const sl =
+  const structuralSL =
     direction === "long"
       ? sweepCandle.low * (1 - SWEEP_PENETRATION)
       : sweepCandle.high * (1 + SWEEP_PENETRATION);
+  const atr15m = atr(ctx.candles15m, rules.regime.atr_period);
+  const sl = widenStopToAtr(entry, structuralSL, direction, atr15m, rules.risk);
 
   // TP: nearest opposite S/R level if it sits beyond entry, else a 3R projection.
   const oppLevel = direction === "long" ? sr.resistance : sr.support;

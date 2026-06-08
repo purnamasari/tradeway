@@ -13,6 +13,7 @@ import { buildSR } from "./strategy/sr-engine.js";
 import { detectLiquiditySweep, type DetectResult } from "./strategy/liquidity-sweep.js";
 import { detectTrendPullback } from "./strategy/trend-pullback.js";
 import { detectSqueeze } from "./strategy/squeeze.js";
+import { detectMomentum } from "./strategy/momentum.js";
 import {
   hydrateContextHistory,
   recordMetrics,
@@ -126,6 +127,7 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
       { strategy: "liquidity_sweep", result: detectLiquiditySweep(ctx, regime, trend, sr, rules) },
       { strategy: "trend_pullback", result: detectTrendPullback(ctx, regime, trend, sr, rules) },
       { strategy: "squeeze", result: detectSqueeze(ctx, regime, trend, sr, rules) },
+      { strategy: "momentum", result: detectMomentum(ctx, regime, trend, sr, rules) },
     ];
     const candidates = entries.map((e) => e.result.signal).filter((s): s is Signal => s !== null);
 

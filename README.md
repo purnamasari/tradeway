@@ -43,12 +43,17 @@ A signal needs both to agree (e.g. `regime=ranging` **AND** `trend=bullish` →
 
 | Strategy | Regime Gate | Pattern |
 |----------|-------------|---------|
+| **momentum** | `trending`/`ranging`/`high_volatility` | Fast directional move (≥`min_move_pct` over `lookback_1m` 1m candles, volume-confirmed) — *rides* the move; blocked only if the 4h trend is strictly opposite |
 | **liquidity_sweep** | `ranging` | Wick sweeps S/R level, then reclaims (bounce) |
 | **trend_pullback** | `trending` | Price pulls back to S/R, then bounces in trend direction |
-| **squeeze** | `high_volatility` | Extreme funding (percentile) + open interest shift |
+| **squeeze** | `high_volatility` | Extreme funding (percentile) + open interest shift — **disabled by default** (`squeeze.enabled`), counter-trend fade pending evidence |
 
 When multiple detectors fire, the scanner selects the signal with the highest
 **combined score** (`confidence × 0.6 + setup_quality × 0.4`).
+
+**Stops are ATR-sized.** Every detector's structural stop is widened to at least
+`risk.atr_sl_mult × ATR(15m)` (floored/capped by `min/max_sl_pct`), so a stop is never
+left inside the noise — a flat 0.5% stop in a high-volatility regime gets run over instantly.
 
 ### Two scores per signal
 
@@ -177,8 +182,9 @@ Postgres) so tests are fully isolated and deterministic.
 - `config/watchlist.yaml` — symbols, per-asset scan interval, asset class,
   per-symbol confidence overrides, global gates (min confidence/quality/RR,
   cooldown).
-- `config/rules.yaml` — regime thresholds, trend tiers, scoring weights, signal
-  lifecycle thresholds (`lifecycle:`), analytics/digest cadence (`analytics:`), retention policy.
+- `config/rules.yaml` — regime thresholds, trend tiers, scoring weights, ATR stop
+  sizing (`risk:`), momentum detector (`momentum:`), squeeze toggle (`squeeze.enabled`),
+  signal lifecycle thresholds (`lifecycle:`), analytics/digest cadence (`analytics:`), retention policy.
 - `.env` (optional, copy from `.env.example`) — enables enhancement layers:
   - `GEMINI_API_KEY` → AI trend classifier (else EMA/ADX fallback)
   - `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` → Telegram alerts (else console)
@@ -356,6 +362,7 @@ src/
   cache.ts                  Redis-or-memory cache
   logger.ts                 leveled logger
   indicators.ts             EMA, ATR, ADX, percentile, z-score (pure math)
+  risk.ts                   ATR-based stop-loss sizing (widenStopToAtr)
   scoring.ts                confidence + setup_quality
   notify.ts                 Telegram/console + explainability formatter
   types.ts                  shared domain types
@@ -383,9 +390,10 @@ src/
   ai/trend-classifier.ts    3-tier trend classifier (Gemini → fallback)
   strategy/
     sr-engine.ts            swing pivots → clustering → strength scoring
+    momentum.ts             fast directional move / breakout detector (ATR stop)
     liquidity-sweep.ts      sweep+reclaim detector
     trend-pullback.ts       pullback-to-S/R + bounce detector
-    squeeze.ts              extreme funding + OI changes in high-volatility regime detector
+    squeeze.ts              extreme funding + OI changes detector (disabled by default)
   test-chart.ts             quick test script to generate a mock chart to disk
   test-telegram.ts          quick Telegram connectivity test script
 config/

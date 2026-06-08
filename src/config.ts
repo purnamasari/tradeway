@@ -61,10 +61,24 @@ export interface Rules {
     structure_intact: number;
   };
   squeeze: {
+    enabled: boolean;
     funding_extreme_low: number;
     funding_extreme_high: number;
     oi_zscore_min: number;
     oi_zscore_max: number;
+  };
+  risk: {
+    atr_sl_mult: number; // stop distance >= this * ATR(15m)
+    min_sl_pct: number; // floor on stop distance, percent of price
+    max_sl_pct: number; // cap on stop distance, percent of price
+  };
+  momentum: {
+    enabled: boolean;
+    lookback_1m: number; // window of 1m candles to measure the move
+    min_move_pct: number; // |move| over the window to qualify (percent)
+    vol_mult: number; // latest volume >= this * window-average volume
+    tp_r: number; // take-profit R-multiple when no S/R target
+    max_final_candle_frac: number; // reject if > this fraction of the move is one bar
   };
   lifecycle: {
     weakening_confidence_drop: number; // ACTIVE → EDGE_WEAKENING
@@ -139,12 +153,38 @@ const ANALYTICS_DEFAULTS: Rules["analytics"] = {
   digest_window_days: 7,
 };
 
+const RISK_DEFAULTS: Rules["risk"] = {
+  atr_sl_mult: 1.5,
+  min_sl_pct: 0.4,
+  max_sl_pct: 5.0,
+};
+
+const MOMENTUM_DEFAULTS: Rules["momentum"] = {
+  enabled: true,
+  lookback_1m: 7,
+  min_move_pct: 1.5,
+  vol_mult: 1.2,
+  tp_r: 2.5,
+  max_final_candle_frac: 0.7,
+};
+
+const SQUEEZE_DEFAULTS: Rules["squeeze"] = {
+  enabled: false, // disabled pending evidence
+  funding_extreme_low: 10,
+  funding_extreme_high: 90,
+  oi_zscore_min: 1.0,
+  oi_zscore_max: -1.0,
+};
+
 export function loadRules(): Rules {
   const rules = load<Rules>("rules.yaml");
   // Backfill newer config blocks so a rules.yaml predating them still loads.
   rules.lifecycle = { ...LIFECYCLE_DEFAULTS, ...(rules.lifecycle ?? {}) };
   rules.retention = { ...RETENTION_DEFAULTS, ...(rules.retention ?? {}) };
   rules.analytics = { ...ANALYTICS_DEFAULTS, ...(rules.analytics ?? {}) };
+  rules.risk = { ...RISK_DEFAULTS, ...(rules.risk ?? {}) };
+  rules.momentum = { ...MOMENTUM_DEFAULTS, ...(rules.momentum ?? {}) };
+  rules.squeeze = { ...SQUEEZE_DEFAULTS, ...(rules.squeeze ?? {}) };
   return rules;
 }
 

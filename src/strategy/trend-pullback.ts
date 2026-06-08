@@ -14,8 +14,9 @@ import type {
   TrendResult,
 } from "../types.js";
 import type { Rules } from "../config.js";
-import { ema } from "../indicators.js";
+import { ema, atr } from "../indicators.js";
 import { scoreConfidence, scoreSetupQuality } from "../scoring.js";
+import { widenStopToAtr } from "../risk.js";
 
 const PULLBACK_TOLERANCE = 0.005; // price within 0.5% of S/R level counts as "at the level"
 const HTF_TOLERANCE = 0.005; // 4H level within 0.5% of 15m level => aligned
@@ -88,11 +89,13 @@ export function detectTrendPullback(
   const entry_high = direction === "long" ? entryRef : entryRef + band;
   const entry = (entry_low + entry_high) / 2;
 
-  // SL: beyond the pullback extreme.
-  const sl =
+  // SL: beyond the pullback extreme, then widened to ATR so it isn't inside the noise.
+  const structuralSL =
     direction === "long"
       ? touchCandle.low * 0.998 // slightly below the pullback low
       : touchCandle.high * 1.002; // slightly above the pullback high
+  const atr15m = atr(ctx.candles15m, rules.regime.atr_period);
+  const sl = widenStopToAtr(entry, structuralSL, direction, atr15m, rules.risk);
 
   // TP: nearest opposite S/R level or a 3R projection.
   const oppLevel = direction === "long" ? sr.resistance : sr.support;
