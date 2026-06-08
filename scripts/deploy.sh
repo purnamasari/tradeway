@@ -60,6 +60,14 @@ echo "  now at $COMMIT"
 echo "▶ pnpm install --frozen-lockfile"
 pnpm install --frozen-lockfile
 
+# ── 2b. Ensure a browser for chart rendering ──────────────────────────────────
+# puppeteer-core does NOT download a browser, so without this charts can't render
+# and alerts go out text-only (no image). Install Chrome-for-Testing into the
+# puppeteer cache — idempotent, skips an already-present build. A failure here is
+# non-fatal: the bot still runs and sends text alerts, so don't fail the deploy.
+echo "▶ ensuring Chrome for chart rendering"
+pnpm chrome:install || echo "  ⚠ Chrome install failed — alerts will be text-only until fixed" >&2
+
 # ── 3. Schema sync (no-op if DATABASE_URL is unset) ───────────────────────────
 # Reconcile the live schema with src/db/schema.ts via drizzle-kit push — the same
 # workflow as local `pnpm db:push`. drizzle-kit auto-loads .env for the connection.

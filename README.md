@@ -182,6 +182,7 @@ git clone https://github.com/purnamasari/tradeway.git tradeaway
 cd tradeaway
 cp .env.example .env        # fill in secrets
 pnpm install --frozen-lockfile
+pnpm chrome:install         # download Chrome for chart rendering (see note below)
 pnpm db:push                # if DATABASE_URL is set — reconcile schema
 
 pm2 start ecosystem.config.cjs
@@ -193,8 +194,28 @@ pm2 startup                 # print the command to enable PM2 on boot, then run 
 
 `.github/workflows/deploy.yml` runs on every push to `main`: it typechecks, then
 SSHes into the VPS and runs `scripts/deploy.sh` (`git reset --hard origin/main` →
-`pnpm install` → `drizzle-kit push` → `pm2 reload` → verify `/health`). A red
-health check fails the deploy. Schema sync uses `push` (not migration files);
+`pnpm install` → `pnpm chrome:install` → `drizzle-kit push` → `pm2 reload` →
+verify `/health`). A red health check fails the deploy.
+
+#### Chart rendering needs a browser
+
+`puppeteer-core` does **not** download a browser, so the bot needs a Chrome to
+render chart images. Without one, `renderChart()` returns `null` and alerts go
+out **text-only** (no image attached). `pnpm chrome:install` downloads
+Chrome-for-Testing into the puppeteer cache (`~/.cache/puppeteer`), and the
+renderer auto-discovers it there — the deploy runs this for you (a failure is
+non-fatal: the bot still sends text alerts). The renderer resolves a browser in
+this order: `CHROME_PATH` → system Chrome/Chromium → puppeteer cache.
+
+On a **bare Linux server**, the downloaded Chrome also needs its shared libraries:
+
+```bash
+sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 \
+  libasound2 libxshmfence1 libgbm1 fonts-liberation
+```
+
+Alternatively, install system Chrome (`apt-get install -y google-chrome-stable`,
+which pulls those deps) and either let auto-detection find it or set `CHROME_PATH`. Schema sync uses `push` (not migration files);
 additive changes apply automatically, destructive ones abort rather than
 auto-truncate (run those by hand).
 
@@ -255,6 +276,7 @@ src/
   types.ts                  shared domain types
   chart/
     renderer.ts             Puppeteer-core + system Chrome + Lightweight Charts PNG generator
+    path-calculator.ts      per-strategy expected-path overlay (markers, zones, projection)
     template.html           self-contained HTML/JS charting template
   data/
     bybit.ts                public v5 REST: klines, ticker, funding, OI
@@ -286,9 +308,10 @@ drizzle.config.ts           Drizzle Kit config for schema management
 Deferred to later sprints:
 - **R2 Storage CDN**: Charts are sent directly as raw buffer attachments via Telegram bot API rather than stored on a CDN.
 - **Squeeze two-phase WS trigger**: The squeeze detector runs per scan rather than arming a pre-condition and confirming on a WebSocket tick.
-- **Prev Day/Week H/L S/R source** and **expected-path chart overlay** (calculated per strategy).
+- **Prev Day/Week H/L S/R source** (high-weight S/R levels from REST).
 
 Recently landed (post-MVP):
+- **Expected-path chart overlay** — per-strategy `chart/path-calculator.ts` adds entry/sweep/reclaim markers, a shaded watch zone, and a dotted projection from entry to TP, computed on the rendered candle series.
 - **Bybit WebSocket feed** — streamed candles/ticker with REST seeding + reconnect (`MARKET_FEED=ws`).
 - **BullMQ scheduler** — durable repeatable jobs when `REDIS_URL` is set, `setInterval` fallback otherwise.
 - **Adaptive-threshold history accumulation** — historical backfill into `market_history`.

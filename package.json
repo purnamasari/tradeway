@@ -14,6 +14,7 @@
     "build": "tsc",
     "test:telegram": "tsx src/test-telegram.ts",
     "test:chart": "tsx src/test-chart.ts",
+    "chrome:install": "node scripts/install-chrome.mjs",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
@@ -31,6 +32,7 @@
     "ioredis": "^5.4.1"
   },
   "devDependencies": {
+    "@puppeteer/browsers": "^3.0.4",
     "@types/node": "^22.10.0",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.2",
