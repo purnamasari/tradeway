@@ -77,7 +77,12 @@ function logScanDecision(
   logger.info(lines.join("\n"));
 }
 
-export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise<void> {
+/**
+ * Run the full pipeline for one symbol. Returns a one-line summary of the outcome
+ * (alert / no-signal / gated / suppressed / error) so callers like the `/scan`
+ * command can report the result; the scheduler ignores the return value.
+ */
+export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise<string> {
   const { cache, notifier, rules, global, env, db } = deps;
   const minConfidence = asset.min_confidence ?? global.min_confidence;
 
@@ -90,7 +95,7 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     const ctx = await deps.getContext(asset.symbol, env.bybitCategory);
     if (ctx.candles15m.length < 60 || ctx.candles4h.length < 60) {
       logger.warn(`[scan] ${asset.symbol}: insufficient candle history, skipping`);
-      return;
+      return `${asset.symbol}: insufficient candle history`;
     }
 
     // Historical context = backfilled market_history (bulk bootstrap) merged with
@@ -126,7 +131,7 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
 
     if (candidates.length === 0) {
       logScanDecision(asset.symbol, regime, trend, entries, "no signal — all detectors rejected");
-      return;
+      return `${asset.symbol}: no signal (regime ${regime.regime}, trend ${trend.trend})`;
     }
 
     // Pick the highest combined-score signal.
@@ -144,7 +149,7 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     }
     if (gateReason) {
       logScanDecision(asset.symbol, regime, trend, entries, `gate: ${signal.strategy} ${gateReason}`);
-      return;
+      return `${asset.symbol}: ${signal.strategy} gated — ${gateReason}`;
     }
 
     // ── Active-signal registry (one active signal per symbol) ────────────────────
@@ -162,14 +167,14 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
         entries,
         `suppressed: active signal exists (#${openOutcome.id} ${openOutcome.status}, edge=${openOutcome.edge_state})`,
       );
-      return;
+      return `${asset.symbol}: suppressed — active signal #${openOutcome.id} (${openOutcome.status}, edge ${openOutcome.edge_state})`;
     }
 
     // ── Cooldown ────────────────────────────────────────────────────────────────
     const cooldownKey = `cooldown:${asset.symbol}:${signal.strategy}`;
     if (await cache.get(cooldownKey)) {
       logScanDecision(asset.symbol, regime, trend, entries, `cooldown: suppressing duplicate ${signal.strategy}`);
-      return;
+      return `${asset.symbol}: cooldown — ${signal.strategy} suppressed`;
     }
     await cache.setex(cooldownKey, global.alert_cooldown_min * 60, "1");
 
@@ -189,16 +194,27 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
       logger.warn(`[scan] Chart render failed for ${asset.symbol}: ${(err as Error).message}`);
     }
 
-    // ── Persist signal, create outcome & notify ──────────────────────────────
+    // ── Persist signal, (maybe) create outcome & notify ───────────────────────
+    // When require_follow is on and the notifier is interactive (Telegram), the
+    // signal is NOT tracked yet — the user activates it by pressing Follow, which
+    // creates the outcome. Otherwise (console, or flag off) auto-track as before.
     const signalId = await recordSignal(db, signal);
-    if (signalId !== null) {
+    const followable = rules.lifecycle.require_follow && notifier.interactive && signalId !== null;
+    if (signalId !== null && !followable) {
       await createOutcome(db, signal, signalId);
     }
-    await notifier.send(signal, chartPng);
+    await notifier.send(signal, chartPng, { signalId: signalId ?? undefined, followable });
+
+    return (
+      `${asset.symbol}: ✅ ${signal.direction} ${signal.strategy} ` +
+      `(conf ${signal.confidence}, quality ${signal.setup_quality}, RR 1:${signal.rr})` +
+      (followable ? " — Follow to track" : "")
+    );
   } catch (err) {
     threw = true;
     recordScanError(asset.symbol, (err as Error).message);
     logger.error(`[scan] ${asset.symbol} failed: ${(err as Error).message}`);
+    return `${asset.symbol}: scan error — ${(err as Error).message}`;
   } finally {
     if (!threw) recordScanSuccess(asset.symbol);
   }

@@ -72,6 +72,9 @@ export const signals = pgTable(
     trend_source: text("trend_source").notNull(),
     payload: jsonb("payload").notNull(), // full Signal object
     detected_at: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    // Human action via the Telegram Follow/Skip buttons (null = undecided).
+    decision: text("decision"), // 'followed' | 'skipped'
+    decided_at: timestamp("decided_at", { withTimezone: true }),
   },
   (t) => [
     index("idx_signal_symbol_time").on(t.symbol, t.detected_at),
@@ -109,6 +112,10 @@ export const signalOutcomes = pgTable(
     strategy: text("strategy").notNull(),
     direction: text("direction").notNull(),
     status: text("status").notNull().default("PENDING_ENTRY"),
+    // A followed outcome is a real tracked trade; a shadow outcome (followed=false,
+    // created when a signal is Skipped) is evaluated silently for counterfactual data
+    // but is excluded from edge monitoring, notifications, and the active-slot check.
+    followed: boolean("followed").notNull().default(true),
     entry_price: real("entry_price").notNull(),
     entry_low: real("entry_low").notNull(),
     entry_high: real("entry_high").notNull(),

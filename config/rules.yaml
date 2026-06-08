@@ -37,6 +37,7 @@ lifecycle:
   invalidate_confidence_floor: 35  # live confidence at/below => INVALIDATED (critical, alone)
   invalidate_min_failures: 2       # # of soft failures (trend/regime/structure/drop) for INVALIDATED
   invalidate_grace_min: 5          # never INVALIDATED within this many minutes of signal creation
+  require_follow: true             # Telegram: track a signal only after Follow is pressed (console always auto-tracks)
   update_confidence_delta: 15      # send Telegram update if live conf moved >= this since last
   update_min_interval_min: 10      # min minutes between non-state-change updates
   edge_history_min_delta: 3        # append signal_edge_updates row when live conf moves >= this

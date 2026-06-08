@@ -8,7 +8,7 @@ import { ENTRY_TTL } from "../types.js";
 import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes, signalEdgeUpdates } from "./schema.js";
 import { atr, adx, ema, atrSeries } from "../indicators.js";
 import { logger } from "../logger.js";
-import { asc, desc, eq, gte, lt, and, sql, inArray, isNotNull } from "drizzle-orm";
+import { asc, desc, eq, gte, lt, and, sql, inArray, isNotNull, isNull } from "drizzle-orm";
 
 /**
  * Merge backfilled market_history + accumulated metric_history into `ctx`'s
@@ -120,6 +120,46 @@ export async function recordSignal(db: Db, signal: Signal): Promise<number | nul
   }
 }
 
+/** Reconstruct a Signal from its stored payload (for Follow/Skip actions). */
+export async function fetchSignalById(db: Db, id: number): Promise<Signal | null> {
+  if (!db) return null;
+  try {
+    const rows = await db
+      .select({ payload: signalsTable.payload })
+      .from(signalsTable)
+      .where(eq(signalsTable.id, id))
+      .limit(1);
+    return (rows[0]?.payload as Signal) ?? null;
+  } catch (err) {
+    logger.warn(`[db] fetchSignalById failed for #${id}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Record the human Follow/Skip decision on a signal. Idempotent: only the first
+ * decision sticks (WHERE decision IS NULL), so a double-press is a no-op. Returns
+ * true if this call set the decision, false if it was already decided.
+ */
+export async function setSignalDecision(
+  db: Db,
+  id: number,
+  decision: "followed" | "skipped",
+): Promise<boolean> {
+  if (!db) return false;
+  try {
+    const rows = await db
+      .update(signalsTable)
+      .set({ decision, decided_at: new Date() })
+      .where(and(eq(signalsTable.id, id), isNull(signalsTable.decision)))
+      .returning({ id: signalsTable.id });
+    return rows.length > 0;
+  } catch (err) {
+    logger.warn(`[db] setSignalDecision failed for #${id}: ${(err as Error).message}`);
+    return false;
+  }
+}
+
 // ── Outcome persistence ─────────────────────────────────────────────────────
 
 /**
@@ -130,6 +170,7 @@ export async function createOutcome(
   db: Db,
   signal: Signal,
   signalId: number,
+  followed = true,
 ): Promise<void> {
   if (!db) return;
   try {
@@ -142,6 +183,7 @@ export async function createOutcome(
       symbol: signal.symbol,
       strategy: signal.strategy,
       direction: signal.direction,
+      followed,
       status: "PENDING_ENTRY",
       entry_price: (signal.entry_low + signal.entry_high) / 2,
       entry_low: signal.entry_low,
@@ -163,7 +205,7 @@ export async function createOutcome(
         regime: signal.regime,
       },
     });
-    logger.info(`[outcome] Created PENDING_ENTRY for ${signal.symbol} ${signal.direction} ${signal.strategy} (signal #${signalId})`);
+    logger.info(`[outcome] Created PENDING_ENTRY${followed ? "" : " (shadow)"} for ${signal.symbol} ${signal.direction} ${signal.strategy} (signal #${signalId})`);
   } catch (err) {
     logger.warn(`[db] createOutcome failed for ${signal.symbol}: ${(err as Error).message}`);
   }
@@ -187,6 +229,7 @@ export interface OutcomeRow {
   activated_at: Date | null;
   closed_at: Date | null;
   expires_at: Date;
+  followed: boolean;
   // Edge lifecycle
   original_confidence: number | null;
   original_setup_quality: number | null;
@@ -213,14 +256,20 @@ export interface EdgeFactorsSnapshot {
   regime?: string;
 }
 
-/** Fetch all outcomes that need evaluation (PENDING_ENTRY or ACTIVE). */
-export async function fetchOpenOutcomes(db: Db): Promise<OutcomeRow[]> {
+/**
+ * Fetch open outcomes (PENDING_ENTRY or ACTIVE). The price tracker wants all of
+ * them (incl. shadows, for counterfactual eval); the edge monitor passes
+ * `followedOnly` to skip shadows.
+ */
+export async function fetchOpenOutcomes(
+  db: Db,
+  opts: { followedOnly?: boolean } = {},
+): Promise<OutcomeRow[]> {
   if (!db) return [];
   try {
-    const rows = await db
-      .select()
-      .from(signalOutcomes)
-      .where(inArray(signalOutcomes.status, ["PENDING_ENTRY", "ACTIVE"]));
+    const open = inArray(signalOutcomes.status, ["PENDING_ENTRY", "ACTIVE"]);
+    const where = opts.followedOnly ? and(open, eq(signalOutcomes.followed, true)) : open;
+    const rows = await db.select().from(signalOutcomes).where(where);
     return rows as OutcomeRow[];
   } catch (err) {
     logger.warn(`[db] fetchOpenOutcomes failed: ${(err as Error).message}`);
@@ -294,6 +343,7 @@ export async function fetchOpenOutcomeForSymbol(
       .where(
         and(
           eq(signalOutcomes.symbol, symbol),
+          eq(signalOutcomes.followed, true),
           inArray(signalOutcomes.status, ["PENDING_ENTRY", "ACTIVE"]),
         ),
       )

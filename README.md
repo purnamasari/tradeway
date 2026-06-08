@@ -67,7 +67,15 @@ A signal is **stateful** after publication. Each `signal_outcomes` row tracks tw
 | `status` (price) | `PENDING_ENTRY → ACTIVE → TP_HIT \| SL_HIT \| EXPIRED` | did price enter / hit TP/SL / expire (the **Outcome Evaluator**) |
 | `edge_state` (edge) | `ACTIVE → EDGE_WEAKENING → INVALIDATED` | does the original thesis still hold (the **Edge Monitor**) |
 
-- **One active signal per symbol.** While a symbol has an open row
+- **Follow / Skip activation** (`lifecycle.require_follow`, default on, Telegram only).
+  When enabled, an alert arrives with **Follow** / **Skip** buttons and is *not* tracked yet:
+  - **Follow** creates the outcome and starts lifecycle/edge monitoring.
+  - **Skip** records the decision and creates a silent **shadow** outcome (`followed=false`) —
+    evaluated for price (counterfactual "would-have-won" data) but excluded from notifications,
+    edge monitoring, the active-slot check, and the main analytics. Ignoring the alert tracks
+    nothing.
+  Console mode (or `require_follow: false`) keeps auto-tracking every signal as before.
+- **One active signal per symbol.** While a symbol has an open *followed* row
   (`status IN (PENDING_ENTRY, ACTIVE)`), the scanner **suppresses** new signals for it —
   you get an *update*, never a duplicate. (DB-less mode has no registry, so the per-strategy
   cooldown is the fallback dedupe there.)
@@ -104,7 +112,8 @@ engine (`src/analytics/`), surfaced three ways:
   `analytics.digest_every_hours`), pushed via the notifier.
 - **HTTP** — `GET /analytics?days=N` on the health server returns the report as JSON.
 - **Telegram commands** — in loop mode the bot also *listens* for `/analytics [days]`
-  (digest on demand) and `/status` (current open signals). Commands are accepted only
+  (digest on demand), `/status` (current open signals), and `/scan SYMBOL` (force a fresh
+  scan, e.g. `/scan ZECUSDT`, replying with the result). Commands are accepted only
   from the configured `TELEGRAM_CHAT_ID`. Long-polling runs in the one loop-mode process,
   so don't run a second loop-mode instance against the same bot token while it's live —
   Telegram allows only one `getUpdates` poller per bot. (Send-only scripts like
@@ -232,8 +241,9 @@ log (`scheduler=bullmq|interval`).
    ```
 
    Tables created: `metric_history`, `signals`, `regime_log`, `signal_outcomes`,
-   `signal_edge_updates`. The lifecycle columns and `signal_edge_updates` are additive,
-   so `pnpm db:push` applies them to an existing database without data loss.
+   `signal_edge_updates`. All lifecycle/analytics/interactive columns (incl.
+   `signals.decision`, `signal_outcomes.followed`) are additive, so `pnpm db:push`
+   applies them to an existing database without data loss.
 
 ## Deployment (VPS + PM2 + CI/CD)
 

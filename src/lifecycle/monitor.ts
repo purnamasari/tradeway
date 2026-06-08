@@ -33,7 +33,8 @@ export async function monitorEdges(deps: EdgeMonitorDeps): Promise<void> {
   const { db, getContext, category, rules } = deps;
   if (!db) return;
 
-  const outcomes = await fetchOpenOutcomes(db);
+  // Only real (followed) signals get edge monitoring; shadows are price-only.
+  const outcomes = await fetchOpenOutcomes(db, { followedOnly: true });
   if (outcomes.length === 0) return;
 
   // One context build per unique symbol (max one open outcome per symbol anyway).
