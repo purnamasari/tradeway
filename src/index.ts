@@ -70,29 +70,8 @@ async function main() {
     env.databaseUrl = undefined;
   }
 
-  const cache = await createCache(env.redisUrl);
-  const db = await createDb(env.databaseUrl);
-  const notifier = await createNotifier(env);
-
-  const backfillSymbols = watchlist.assets.filter((a) => a.enabled).map((a) => a.symbol);
-
-  // ── Manual one-time backfill (`--backfill`): force a full run, then exit. ──
-  if (backfillOnly) {
-    if (!db) {
-      logger.error("[boot] --backfill requires DATABASE_URL");
-      process.exit(1);
-    }
-    logger.info(`[boot] historical backfill · ${backfillSymbols.length} symbols · category=${env.bybitCategory}`);
-    await runHistoricalBackfill(db, env.bybitCategory, backfillSymbols, rules);
-    return;
-  }
-
-  const getContext: ContextProvider = mock
-    ? (symbol, category) => buildMockContext(symbol, category, mockScenario)
-    : buildMarketContext;
-
-  const deps: ScannerDeps = { cache, db, notifier, rules, global: watchlist.global, env, getContext };
   const enabled = watchlist.assets.filter((a) => a.enabled);
+  const backfillSymbols = enabled.map((a) => a.symbol);
 
   logger.info(
     `[boot] tradeaway · ${enabled.length} symbols · category=${env.bybitCategory} · ${once ? "single pass" : "loop mode"}${mock ? ` · MOCK DATA (${mockScenario})` : ""}`,
@@ -100,15 +79,6 @@ async function main() {
   logger.info(
     `[boot] AI=${env.geminiApiKey ? "gemini+fallback" : "rule-fallback"} · alerts=${env.telegramBotToken ? "telegram" : "console"} · db=${env.databaseUrl ? "postgres" : "disabled"}`,
   );
-
-  if (once) {
-    if (db) await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
-    for (const asset of enabled) {
-      await scanSymbol(asset, deps);
-    }
-    logger.info("[boot] Single pass complete");
-    return;
-  }
 
   // Decide the market-data source up front. The streamed feed needs the global
   // WebSocket (Node >= 21); if it's missing, degrade to REST instead of crashing.
@@ -119,13 +89,16 @@ async function main() {
   }
   let feed: MarketFeed | null = null;
 
-  // ── Health server (started FIRST) ─────────────────────────────────────────────
-  // Bind /health before any slow boot work (history bootstrap, WS REST-seeding) so
-  // the endpoint answers immediately for the deploy health gate, PM2-external
-  // monitoring, and cron checks — a slow seed must not look like a dead process.
-  const maxIntervalMs = Math.max(...enabled.map((a) => a.scan_interval)) * 60_000;
+  // ── Health server (started FIRST, before ANY network-touching await) ──────────
+  // Bind /health *before* createCache/createDb/createNotifier and before slow boot
+  // work (history bootstrap, WS REST-seeding). A hung Redis/Postgres connect or a
+  // slow seed must not stop the endpoint from answering the deploy health gate,
+  // PM2-external monitoring, and cron checks. The dependency booleans below come
+  // from config (env), not the live clients, so they're known this early. One-shot
+  // modes (--once/--backfill) exit on their own and need no health server.
   const info = buildInfo();
-  if (env.healthPort > 0) {
+  if (!once && !backfillOnly && env.healthPort > 0) {
+    const maxIntervalMs = Math.max(...enabled.map((a) => a.scan_interval)) * 60_000;
     startHealthServer(
       {
         version: info.version,
@@ -146,6 +119,40 @@ async function main() {
       env.healthPort,
       env.healthHost,
     );
+  }
+
+  // ── Dependencies (may touch the network) ──────────────────────────────────────
+  // createCache opens a Redis connection; createNotifier inits the Telegram bot.
+  // These run AFTER the health server is listening, so a slow or hung connect can
+  // no longer make the process look dead to the deploy gate.
+  const cache = await createCache(env.redisUrl);
+  const db = await createDb(env.databaseUrl);
+  const notifier = await createNotifier(env);
+
+  // ── Manual one-time backfill (`--backfill`): force a full run, then exit. ──
+  if (backfillOnly) {
+    if (!db) {
+      logger.error("[boot] --backfill requires DATABASE_URL");
+      process.exit(1);
+    }
+    logger.info(`[boot] historical backfill · ${backfillSymbols.length} symbols · category=${env.bybitCategory}`);
+    await runHistoricalBackfill(db, env.bybitCategory, backfillSymbols, rules);
+    return;
+  }
+
+  const getContext: ContextProvider = mock
+    ? (symbol, category) => buildMockContext(symbol, category, mockScenario)
+    : buildMarketContext;
+
+  const deps: ScannerDeps = { cache, db, notifier, rules, global: watchlist.global, env, getContext };
+
+  if (once) {
+    if (db) await bootstrapHistoryIfNeeded(db, env.bybitCategory, backfillSymbols, rules);
+    for (const asset of enabled) {
+      await scanSymbol(asset, deps);
+    }
+    logger.info("[boot] Single pass complete");
+    return;
   }
 
   // ── Crash & shutdown monitoring ───────────────────────────────────────────────
