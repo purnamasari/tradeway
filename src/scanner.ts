@@ -14,12 +14,12 @@ import { detectLiquiditySweep, type DetectResult } from "./strategy/liquidity-sw
 import { detectTrendPullback } from "./strategy/trend-pullback.js";
 import { detectSqueeze } from "./strategy/squeeze.js";
 import {
-  fetchHistoricalMetricsFromDb,
-  fetchHistoricalContextFromMarketHistory,
+  hydrateContextHistory,
   recordMetrics,
   recordRegime,
   recordSignal,
   createOutcome,
+  fetchOpenOutcomeForSymbol,
 } from "./db/accumulate.js";
 import { ema } from "./indicators.js";
 import { renderChart } from "./chart/renderer.js";
@@ -94,28 +94,9 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     }
 
     // Historical context = backfilled market_history (bulk bootstrap) merged with
-    // runtime metric_history (accumulated per scan). Concatenated into one window
-    // per metric — order is irrelevant for percentile/z-score distributions.
-    const marketHist = await fetchHistoricalContextFromMarketHistory(db, asset.symbol, {
-      fundingDays: rules.backfill.funding_days,
-      oiDays: rules.backfill.oi_days,
-      // Percentile (ATR/volume) window stays reactive even though 90d are stored.
-      candleDays: rules.backfill.percentile_days,
-      atrPeriod: rules.regime.atr_period,
-    });
-    const metricHist = await fetchHistoricalMetricsFromDb(db, asset.symbol);
-
-    const fundingHistory = [...(marketHist?.fundingHistory ?? []), ...(metricHist?.fundingHistory ?? [])];
-    const oiHistory = [...(marketHist?.oiHistory ?? []), ...(metricHist?.oiHistory ?? [])];
-    const atrHistory = [...(marketHist?.atrHistory ?? []), ...(metricHist?.atrHistory ?? [])];
-    const volumeHistory = [...(marketHist?.volumeHistory ?? []), ...(metricHist?.volumeHistory ?? [])];
-    const recordCount = (marketHist?.recordCount ?? 0) + (metricHist?.recordCount ?? 0);
-
-    ctx.historyConfidence = Math.min(recordCount / 100, 1.0);
-    if (oiHistory.length >= 30) ctx.oiHistory = oiHistory;
-    if (fundingHistory.length >= 50) ctx.fundingHistory = fundingHistory;
-    if (atrHistory.length >= 50) ctx.atrHistory = atrHistory;
-    if (volumeHistory.length >= 50) ctx.volumeHistory = volumeHistory;
+    // runtime metric_history (accumulated per scan), folded into ctx's percentile/
+    // z-score windows. Shared with the edge monitor so both score identically.
+    await hydrateContextHistory(db, ctx, rules);
 
     const regime = classifyRegime(ctx.candles15m, rules.regime, ctx.atrHistory);
 
@@ -163,6 +144,24 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     }
     if (gateReason) {
       logScanDecision(asset.symbol, regime, trend, entries, `gate: ${signal.strategy} ${gateReason}`);
+      return;
+    }
+
+    // ── Active-signal registry (one active signal per symbol) ────────────────────
+    // If this symbol already has an open signal (PENDING_ENTRY or ACTIVE), suppress a
+    // new one — the edge monitor sends updates on the existing signal instead. The
+    // slot stays occupied even when the edge is INVALIDATED (no auto-close); it frees
+    // only when price resolves (TP/SL/expiry). DB-less mode has no registry, so the
+    // cooldown below remains the fallback dedupe there.
+    const openOutcome = await fetchOpenOutcomeForSymbol(db, asset.symbol);
+    if (openOutcome) {
+      logScanDecision(
+        asset.symbol,
+        regime,
+        trend,
+        entries,
+        `suppressed: active signal exists (#${openOutcome.id} ${openOutcome.status}, edge=${openOutcome.edge_state})`,
+      );
       return;
     }
 

@@ -66,9 +66,19 @@ export interface Rules {
     oi_zscore_min: number;
     oi_zscore_max: number;
   };
+  lifecycle: {
+    weakening_confidence_drop: number; // ACTIVE → EDGE_WEAKENING
+    invalidate_confidence_floor: number; // live confidence at/below → INVALIDATED (critical)
+    invalidate_min_failures: number; // # of soft failures required for INVALIDATED
+    update_confidence_delta: number; // notify if live conf moves >= this since last notify
+    update_min_interval_min: number; // min minutes between non-state-change updates
+    edge_history_min_delta: number; // append history row when live conf moves >= this
+    edge_history_min_interval_min: number; // ...or at least this often (heartbeat)
+  };
   retention: {
     metric_history_days: number;
     regime_log_days: number;
+    edge_updates_days: number;
   };
   backfill: {
     funding_days: number;
@@ -98,8 +108,28 @@ export function loadWatchlist(): Watchlist {
   return { global: raw.global, assets };
 }
 
+const LIFECYCLE_DEFAULTS: Rules["lifecycle"] = {
+  weakening_confidence_drop: 20,
+  invalidate_confidence_floor: 35,
+  invalidate_min_failures: 2,
+  update_confidence_delta: 15,
+  update_min_interval_min: 10,
+  edge_history_min_delta: 3,
+  edge_history_min_interval_min: 5,
+};
+
+const RETENTION_DEFAULTS: Rules["retention"] = {
+  metric_history_days: 180,
+  regime_log_days: 90,
+  edge_updates_days: 90,
+};
+
 export function loadRules(): Rules {
-  return load<Rules>("rules.yaml");
+  const rules = load<Rules>("rules.yaml");
+  // Backfill newer config blocks so a rules.yaml predating them still loads.
+  rules.lifecycle = { ...LIFECYCLE_DEFAULTS, ...(rules.lifecycle ?? {}) };
+  rules.retention = { ...RETENTION_DEFAULTS, ...(rules.retention ?? {}) };
+  return rules;
 }
 
 export interface Env {

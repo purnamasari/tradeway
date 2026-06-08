@@ -31,9 +31,20 @@ setup_quality_weights:
   sweep_wick_ratio: 15
   structure_intact: 10
 
+# Active signal lifecycle: edge re-evaluation thresholds (every-minute monitor).
+lifecycle:
+  weakening_confidence_drop: 20    # original − live confidence >= this => EDGE_WEAKENING
+  invalidate_confidence_floor: 35  # live confidence at/below => INVALIDATED (critical, alone)
+  invalidate_min_failures: 2       # # of soft failures (trend/regime/structure/drop) for INVALIDATED
+  update_confidence_delta: 15      # send Telegram update if live conf moved >= this since last
+  update_min_interval_min: 10      # min minutes between non-state-change updates
+  edge_history_min_delta: 3        # append signal_edge_updates row when live conf moves >= this
+  edge_history_min_interval_min: 5 # ...or at least this often (heartbeat), to bound row growth
+
 retention:
   metric_history_days: 180
   regime_log_days: 90
+  edge_updates_days: 90
 
 squeeze:
   funding_extreme_low: 10

@@ -1,6 +1,6 @@
 // Alert delivery. Sends to Telegram when configured, otherwise prints to console.
 // Supports optional chart image attachment (PNG buffer) and outcome notifications.
-import type { Signal, OutcomeStatus } from "./types.js";
+import type { Signal, OutcomeStatus, SignalUpdate } from "./types.js";
 import type { OutcomeRow } from "./db/accumulate.js";
 import type { Env } from "./config.js";
 import { logger } from "./logger.js";
@@ -38,6 +38,50 @@ export function formatAlert(signal: Signal): string {
     `Why?`,
     formatExplainability(signal),
   ].join("\n");
+}
+
+// ── Signal update formatting (edge lifecycle) ───────────────────────────────
+
+const FUNDING_PCTILE_NOTIFY_DELTA = 3; // show Funding line only if it moved >= this
+const OI_Z_NOTIFY_DELTA = 0.3; // show OI line only if it moved >= this
+
+function fmtZ(n: number): string {
+  return n.toFixed(1);
+}
+
+/**
+ * Format an edge-lifecycle update — sent instead of a duplicate signal when a
+ * symbol already has an active signal whose edge has shifted.
+ */
+export function formatSignalUpdate(u: SignalUpdate): string {
+  const dir = u.direction.toUpperCase();
+  const invalid = u.edgeState === "INVALIDATED";
+  const lines: string[] = [
+    invalid ? `⚠ ${u.symbol} ${dir} INVALIDATED` : `⚠ ${u.symbol} ${dir} UPDATE`,
+    ``,
+  ];
+
+  if (invalid) {
+    if (u.reasons.length) {
+      lines.push(`Reason:`);
+      for (const r of u.reasons) lines.push(`- ${r}`);
+      lines.push(``);
+    }
+    lines.push(`Confidence: ${u.original.confidence} → ${u.live.confidence}`);
+    return lines.join("\n");
+  }
+
+  lines.push(`Status: ${u.edgeState}`, ``);
+  lines.push(`Confidence: ${u.original.confidence} → ${u.live.confidence}`);
+  if (Math.abs(u.live.funding_percentile - u.original.funding_percentile) >= FUNDING_PCTILE_NOTIFY_DELTA) {
+    lines.push(`Funding: ${Math.round(u.original.funding_percentile)}% → ${Math.round(u.live.funding_percentile)}%`);
+  }
+  if (Math.abs(u.live.oi_zscore - u.original.oi_zscore) >= OI_Z_NOTIFY_DELTA) {
+    lines.push(`OI Z-score: ${fmtZ(u.original.oi_zscore)} → ${fmtZ(u.live.oi_zscore)}`);
+  }
+  lines.push(``);
+  lines.push(u.edgeState === "EDGE_WEAKENING" ? `Edge weakening — monitor closely.` : `Trade remains valid.`);
+  return lines.join("\n");
 }
 
 // ── Outcome formatting ──────────────────────────────────────────────────────
@@ -96,6 +140,8 @@ export interface Notifier {
     hitPrice: number | null,
     closedAt: Date,
   ): Promise<void>;
+  /** Edge-lifecycle update for an already-active signal (not a new signal). */
+  sendSignalUpdate(update: SignalUpdate): Promise<void>;
   /**
    * Operational/monitoring message (startup, shutdown, crash) — not a trading
    * signal. Never throws: a failure to deliver an ops alert must not take down
@@ -122,6 +168,12 @@ class ConsoleNotifier implements Notifier {
   ): Promise<void> {
     console.log("\n" + "─".repeat(48));
     console.log(formatOutcome(outcome, status, hitPrice, closedAt));
+    console.log("─".repeat(48) + "\n");
+  }
+
+  async sendSignalUpdate(update: SignalUpdate): Promise<void> {
+    console.log("\n" + "─".repeat(48));
+    console.log(formatSignalUpdate(update));
     console.log("─".repeat(48) + "\n");
   }
 
@@ -165,6 +217,11 @@ class TelegramNotifier implements Notifier {
     const text = formatOutcome(outcome, status, hitPrice, closedAt);
     await this.bot.api.sendMessage(this.chatId, text);
     logger.info(`[notify] Sent outcome ${status} for ${outcome.symbol} to Telegram`);
+  }
+
+  async sendSignalUpdate(update: SignalUpdate): Promise<void> {
+    await this.bot.api.sendMessage(this.chatId, formatSignalUpdate(update));
+    logger.info(`[notify] Sent ${update.symbol} ${update.edgeState} update to Telegram`);
   }
 
   async sendOps(text: string): Promise<void> {

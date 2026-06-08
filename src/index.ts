@@ -11,6 +11,7 @@ import { buildMockContext } from "./data/mock.js";
 import { runRetentionCleanup } from "./db/accumulate.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
+import { monitorEdges } from "./lifecycle/monitor.js";
 import { fetchTicker } from "./data/bybit.js";
 import { MarketFeed } from "./data/ws-feed.js";
 import { startScheduler, type PeriodicTask } from "./queue/scheduler.js";
@@ -250,6 +251,23 @@ async function main() {
       name: "outcome",
       everyMs: 60_000,
       run: () => evaluateOutcomes(database, priceFetcher, notifier),
+    });
+    // Edge lifecycle monitor (60s) — recomputes each open signal's edge and sends
+    // updates instead of duplicate signals. Independent of the price tracker above.
+    tasks.push({
+      name: "edge",
+      everyMs: 60_000,
+      run: () =>
+        monitorEdges({
+          db: database,
+          // Live reference so a WS-feed swap of getContext is always picked up.
+          getContext: (s, c) => deps.getContext(s, c),
+          category,
+          cache,
+          rules,
+          env,
+          notifier,
+        }),
     });
     tasks.push({
       name: "retention",
