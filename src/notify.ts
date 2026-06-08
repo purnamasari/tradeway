@@ -16,7 +16,7 @@ export function formatExplainability(signal: Signal): string {
 
   lines.push(`✓ S/R strength ${b.sr_level_strength}`);
   if (b.engulf_body_ratio >= 1.0) lines.push(`✓ Engulf ratio ${b.engulf_body_ratio.toFixed(2)}×`);
-  if (b.htf_aligned) lines.push(`✓ HTF 4H aligned`);
+  if (b.htf_aligned) lines.push(`✓ HTF 1H aligned`);
   if (b.sweep_wick_ratio) lines.push(`✓ Sweep wick ${b.sweep_wick_ratio.toFixed(2)}× body`);
   if (b.structure_intact) lines.push(`✓ Structure intact`);
 

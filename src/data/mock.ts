@@ -2,9 +2,9 @@
 // reproducible. Supports multiple scenarios via MockScenario.
 //
 // Scenarios:
-//   "sweep"    — ranging regime, bullish 4H trend, fresh support sweep+reclaim
+//   "sweep"    — ranging regime, bullish 1H trend, fresh support sweep+reclaim
 //                → textbook liquidity_sweep LONG
-//   "pullback" — trending regime, bullish 4H trend, pullback to support + bounce
+//   "pullback" — trending regime, bullish 1H trend, pullback to support + bounce
 //                → textbook trend_pullback LONG
 //
 // Used by `--mock` so the full pipeline can be exercised without network.
@@ -33,10 +33,10 @@ function candle(time: number, o: number, h: number, l: number, c: number, v: num
   return { time, open: o, high: h, low: l, close: c, volume: v };
 }
 
-// ── 4H generators ────────────────────────────────────────────────────────────
+// ── 1H generators ────────────────────────────────────────────────────────────
 
-/** Clean uptrend on 4H => fallback classifier reads bullish (price>ema20>ema50). */
-function gen4hBullish(base: number, rand: () => number): Candle[] {
+/** Clean uptrend on 1H => fallback classifier reads bullish (price>ema20>ema50). */
+function gen1hBullish(base: number, rand: () => number): Candle[] {
   const out: Candle[] = [];
   let price = base * 0.7;
   const step = (base * 0.3) / 200;
@@ -46,13 +46,13 @@ function gen4hBullish(base: number, rand: () => number): Candle[] {
     const c = price;
     const h = Math.max(o, c) + rand() * base * 0.003;
     const l = Math.min(o, c) - rand() * base * 0.003;
-    out.push(candle(i * 14400, o, h, l, c, 1000 + rand() * 200));
+    out.push(candle(i * 3600, o, h, l, c, 1000 + rand() * 200));
   }
   return out;
 }
 
-/** Clean downtrend on 4H => fallback classifier reads bearish (price<ema20<ema50). */
-function gen4hBearish(base: number, rand: () => number): Candle[] {
+/** Clean downtrend on 1H => fallback classifier reads bearish (price<ema20<ema50). */
+function gen1hBearish(base: number, rand: () => number): Candle[] {
   const out: Candle[] = [];
   let price = base * 1.3;
   const step = -(base * 0.3) / 200;
@@ -62,7 +62,7 @@ function gen4hBearish(base: number, rand: () => number): Candle[] {
     const c = price;
     const h = Math.max(o, c) + rand() * base * 0.003;
     const l = Math.min(o, c) - rand() * base * 0.003;
-    out.push(candle(i * 14400, o, h, l, c, 1000 + rand() * 200));
+    out.push(candle(i * 3600, o, h, l, c, 1000 + rand() * 200));
   }
   return out;
 }
@@ -239,9 +239,9 @@ export async function buildMockContext(
   const rand = rng(hashSeed(symbol));
   const base = 100 + (hashSeed(symbol) % 50);
 
-  const candles4h = scenario === "squeeze"
-    ? (symbol.startsWith("ETH") ? gen4hBearish(base, rand) : gen4hBullish(base, rand))
-    : gen4hBullish(base, rand);
+  const candles1h = scenario === "squeeze"
+    ? (symbol.startsWith("ETH") ? gen1hBearish(base, rand) : gen1hBullish(base, rand))
+    : gen1hBullish(base, rand);
 
   const candles15m = scenario === "pullback"
     ? gen15mTrending(base, rand)
@@ -292,7 +292,7 @@ export async function buildMockContext(
     symbol,
     candles1m,
     candles15m,
-    candles4h,
+    candles1h,
     fundingRate,
     openInterest,
     fundingHistory,

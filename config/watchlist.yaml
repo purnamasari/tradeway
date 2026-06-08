@@ -9,20 +9,20 @@ global:
 assets:
   BTCUSDT:
     enabled: true
-    scan_interval: 10        # minutes
+    scan_interval: 5         # minutes — faster to catch momentum spikes
     min_confidence: 70       # stricter — fewer false positives
     asset_class: benchmark
     notes: "Most liquid, most reliable setups"
 
   ETHUSDT:
     enabled: true
-    scan_interval: 10
+    scan_interval: 5
     asset_class: derivatives_leader
     notes: "Funding/OI most informative here"
 
   SOLUSDT:
     enabled: true
-    scan_interval: 10
+    scan_interval: 5
     asset_class: momentum
     notes: "Trend setups appear more often"
 

@@ -9,7 +9,8 @@ export interface Candle {
   volume: number;
 }
 
-export type Timeframe = "1m" | "15m" | "4h";
+// Timeframe stack (daytrade): 1m = entry trigger, 15m = structure/regime, 1h = bias.
+export type Timeframe = "1m" | "15m" | "1h";
 
 // ── Regime engine ─────────────────────────────────────────────────────────────
 export type Regime = "trending" | "ranging" | "high_volatility" | "low_volatility";
@@ -50,7 +51,7 @@ export interface SRSnapshot {
 }
 
 // ── Strategy / signals ────────────────────────────────────────────────────────
-export type StrategyKind = "liquidity_sweep" | "trend_pullback" | "squeeze";
+export type StrategyKind = "liquidity_sweep" | "trend_pullback" | "squeeze" | "momentum";
 export type Direction = "long" | "short";
 
 export interface ScoreBreakdown {
@@ -130,9 +131,9 @@ export interface PathOverlay {
 // Per-symbol market data assembled once per scan.
 export interface MarketContext {
   symbol: string;
-  candles1m: Candle[];
-  candles15m: Candle[];
-  candles4h: Candle[];
+  candles1m: Candle[]; // entry trigger
+  candles15m: Candle[]; // structure + regime
+  candles1h: Candle[]; // higher-timeframe bias (trend classifier)
   fundingRate: number | null;
   openInterest: number | null;
   fundingHistory: number[]; // recent funding rates for percentile
@@ -199,10 +200,13 @@ export const ENTRY_TTL: Record<StrategyKind, number> = {
   liquidity_sweep: 1 * 60 * 60 * 1000,   // 1h to enter
   trend_pullback:  1 * 60 * 60 * 1000,   // 1h to enter
   squeeze:         30 * 60 * 1000,        // 30m to enter
+  momentum:        30 * 60 * 1000,        // 30m — momentum entries should fill fast
 };
 
+// Daytrade horizon: positions resolve intraday (≤6h), flat within a session.
 export const OUTCOME_TTL: Record<StrategyKind, number> = {
-  liquidity_sweep: 4 * 60 * 60 * 1000,   // 4h to hit TP/SL
+  liquidity_sweep: 6 * 60 * 60 * 1000,   // 6h to hit TP/SL
   trend_pullback:  6 * 60 * 60 * 1000,   // 6h to hit TP/SL
-  squeeze:         8 * 60 * 60 * 1000,   // 8h to hit TP/SL
+  squeeze:         6 * 60 * 60 * 1000,   // 6h to hit TP/SL
+  momentum:        4 * 60 * 60 * 1000,   // 4h — momentum should resolve faster
 };

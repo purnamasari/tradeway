@@ -17,6 +17,7 @@
     "test:chart": "tsx src/test-chart.ts",
     "test:lifecycle": "tsx src/test-lifecycle.ts",
     "test:analytics": "tsx src/test-analytics.ts",
+    "test:momentum": "tsx src/test-momentum.ts",
     "chrome:install": "node scripts/install-chrome.mjs",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",

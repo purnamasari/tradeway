@@ -55,10 +55,27 @@ retention:
   edge_updates_days: 90
 
 squeeze:
+  enabled: false           # disabled pending evidence — was a consistent loser (counter-trend fade)
   funding_extreme_low: 10
   funding_extreme_high: 90
   oi_zscore_min: 1.0
   oi_zscore_max: -1.0
+
+# Stop-loss sizing. Structural stops are widened to ATR so they aren't inside the
+# noise (a flat 0.5% stop in a high-volatility regime gets run over instantly).
+risk:
+  atr_sl_mult: 1.5         # stop distance >= this * ATR(15m)
+  min_sl_pct: 0.4          # floor on stop distance (% of price)
+  max_sl_pct: 5.0          # cap on stop distance (% of price)
+
+# Momentum / breakout detector — rides a fast directional move instead of fading it.
+momentum:
+  enabled: true
+  lookback_1m: 7           # window of 1m candles to measure the move
+  min_move_pct: 1.5        # |move| over the window to qualify (percent)
+  vol_mult: 1.2            # latest volume >= this * window-average volume
+  tp_r: 2.5                # take-profit R-multiple when no S/R target is in range
+  max_final_candle_frac: 0.7  # reject blow-off bars (>70% of the move in one candle)
 
 # One-time historical backfill from Bybit. Bootstraps percentile/z-score windows
 # so adaptive thresholds are meaningful immediately after deploy.

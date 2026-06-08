@@ -5,10 +5,13 @@ import type { Candle, RegimeResult, StrategyKind } from "../types.js";
 import type { Rules } from "../config.js";
 import { adx, atr, atrSeries, ema, percentileRank } from "../indicators.js";
 
+// Momentum is allowed across all live regimes (not just one) so a fast directional
+// move is caught even when the lagging 15m regime label misclassifies it. Squeeze is
+// still listed for high_volatility but is gated off by rules.squeeze.enabled.
 const ALLOWED: Record<RegimeResult["regime"], StrategyKind[]> = {
-  trending: ["trend_pullback"],
-  ranging: ["liquidity_sweep"],
-  high_volatility: ["squeeze"],
+  trending: ["trend_pullback", "momentum"],
+  ranging: ["liquidity_sweep", "momentum"],
+  high_volatility: ["squeeze", "momentum"],
   low_volatility: [],
 };
 

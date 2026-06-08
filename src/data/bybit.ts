@@ -8,7 +8,7 @@ const BASE = "https://api.bybit.com";
 const INTERVAL: Record<Timeframe, string> = {
   "1m": "1",
   "15m": "15",
-  "4h": "240",
+  "1h": "60",
 };
 
 interface BybitResponse<T> {

@@ -19,8 +19,9 @@ import type {
   TrendResult,
 } from "../types.js";
 import type { Rules } from "../config.js";
-import { percentileRank, zScore } from "../indicators.js";
+import { percentileRank, zScore, atr } from "../indicators.js";
 import { scoreConfidence, scoreSetupQuality } from "../scoring.js";
+import { widenStopToAtr } from "../risk.js";
 
 export interface DetectResult {
   signal: Signal | null;
@@ -34,6 +35,9 @@ export function detectSqueeze(
   sr: SRSnapshot,
   rules: Rules,
 ): DetectResult {
+  if (rules.squeeze?.enabled === false) {
+    return { signal: null, reason: "squeeze disabled (rules.squeeze.enabled=false)" };
+  }
   if (!regime.allowedStrategies.includes("squeeze")) {
     return { signal: null, reason: `regime ${regime.regime} blocks squeeze` };
   }
@@ -91,16 +95,15 @@ export function detectSqueeze(
   const entry_high = entryRef + band;
   const entry = entryRef;
 
-  // SL: set outside the extreme of the last 10 1m candles (capped at 0.5% minimum distance)
-  let sl = entryRef;
+  // SL: structural (extreme of the last 10 1m candles), then widened to ATR so it
+  // sits outside the noise — critical in the high-volatility regime squeeze runs in.
   const last10 = c1m.slice(-10);
-  if (direction === "long") {
-    const minLow = Math.min(...last10.map((c) => c.low));
-    sl = Math.min(minLow, entryRef * 0.995);
-  } else {
-    const maxHigh = Math.max(...last10.map((c) => c.high));
-    sl = Math.max(maxHigh, entryRef * 1.005);
-  }
+  const structuralSL =
+    direction === "long"
+      ? Math.min(...last10.map((c) => c.low))
+      : Math.max(...last10.map((c) => c.high));
+  const atr15m = atr(ctx.candles15m, rules.regime.atr_period);
+  const sl = widenStopToAtr(entryRef, structuralSL, direction, atr15m, rules.risk);
 
   // TP: Prefer nearest major S/R level. Fall back to 3:1 RR (3R) target if not present/meaningful.
   const risk = Math.abs(entry - sl);

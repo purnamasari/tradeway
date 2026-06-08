@@ -16,6 +16,7 @@ const PROJECTION_STEPS: Record<Signal["strategy"], number> = {
   liquidity_sweep: 12,
   trend_pullback: 16,
   squeeze: 6,
+  momentum: 6,
 };
 
 /** Seconds between candles in the rendered series (defaults to 15m). */
@@ -144,7 +145,8 @@ export function calculatePath(signal: Signal, candles: Candle[]): PathOverlay {
       };
     }
 
-    case "squeeze": {
+    case "squeeze":
+    case "momentum": {
       const trigger = candles.at(-1)!;
       return {
         markers: [
@@ -153,7 +155,7 @@ export function calculatePath(signal: Signal, candles: Candle[]): PathOverlay {
             position: isLong ? "belowBar" : "aboveBar",
             shape: isLong ? "arrowUp" : "arrowDown",
             color: "#c084fc",
-            text: "squeeze",
+            text: signal.strategy === "momentum" ? "momentum" : "squeeze",
           },
         ],
         projectionLine: projectToTarget(candles, entryPrice, signal.tp, steps),
