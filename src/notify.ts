@@ -142,6 +142,8 @@ export interface Notifier {
   ): Promise<void>;
   /** Edge-lifecycle update for an already-active signal (not a new signal). */
   sendSignalUpdate(update: SignalUpdate): Promise<void>;
+  /** Pre-formatted analytics digest (scheduled performance summary). */
+  sendDigest(text: string): Promise<void>;
   /**
    * Operational/monitoring message (startup, shutdown, crash) — not a trading
    * signal. Never throws: a failure to deliver an ops alert must not take down
@@ -174,6 +176,12 @@ class ConsoleNotifier implements Notifier {
   async sendSignalUpdate(update: SignalUpdate): Promise<void> {
     console.log("\n" + "─".repeat(48));
     console.log(formatSignalUpdate(update));
+    console.log("─".repeat(48) + "\n");
+  }
+
+  async sendDigest(text: string): Promise<void> {
+    console.log("\n" + "─".repeat(48));
+    console.log(text);
     console.log("─".repeat(48) + "\n");
   }
 
@@ -222,6 +230,11 @@ class TelegramNotifier implements Notifier {
   async sendSignalUpdate(update: SignalUpdate): Promise<void> {
     await this.bot.api.sendMessage(this.chatId, formatSignalUpdate(update));
     logger.info(`[notify] Sent ${update.symbol} ${update.edgeState} update to Telegram`);
+  }
+
+  async sendDigest(text: string): Promise<void> {
+    await this.bot.api.sendMessage(this.chatId, text);
+    logger.info(`[notify] Sent analytics digest to Telegram`);
   }
 
   async sendOps(text: string): Promise<void> {

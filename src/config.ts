@@ -70,10 +70,16 @@ export interface Rules {
     weakening_confidence_drop: number; // ACTIVE → EDGE_WEAKENING
     invalidate_confidence_floor: number; // live confidence at/below → INVALIDATED (critical)
     invalidate_min_failures: number; // # of soft failures required for INVALIDATED
+    invalidate_grace_min: number; // no INVALIDATED within this many minutes of creation
     update_confidence_delta: number; // notify if live conf moves >= this since last notify
     update_min_interval_min: number; // min minutes between non-state-change updates
     edge_history_min_delta: number; // append history row when live conf moves >= this
     edge_history_min_interval_min: number; // ...or at least this often (heartbeat)
+  };
+  analytics: {
+    default_window_days: number; // CLI/HTTP default window (0 = all-time)
+    digest_every_hours: number; // scheduled Telegram digest cadence; 0 disables
+    digest_window_days: number; // window the digest summarizes
   };
   retention: {
     metric_history_days: number;
@@ -112,6 +118,7 @@ const LIFECYCLE_DEFAULTS: Rules["lifecycle"] = {
   weakening_confidence_drop: 20,
   invalidate_confidence_floor: 35,
   invalidate_min_failures: 2,
+  invalidate_grace_min: 5,
   update_confidence_delta: 15,
   update_min_interval_min: 10,
   edge_history_min_delta: 3,
@@ -124,11 +131,18 @@ const RETENTION_DEFAULTS: Rules["retention"] = {
   edge_updates_days: 90,
 };
 
+const ANALYTICS_DEFAULTS: Rules["analytics"] = {
+  default_window_days: 30,
+  digest_every_hours: 168,
+  digest_window_days: 7,
+};
+
 export function loadRules(): Rules {
   const rules = load<Rules>("rules.yaml");
   // Backfill newer config blocks so a rules.yaml predating them still loads.
   rules.lifecycle = { ...LIFECYCLE_DEFAULTS, ...(rules.lifecycle ?? {}) };
   rules.retention = { ...RETENTION_DEFAULTS, ...(rules.retention ?? {}) };
+  rules.analytics = { ...ANALYTICS_DEFAULTS, ...(rules.analytics ?? {}) };
   return rules;
 }
 

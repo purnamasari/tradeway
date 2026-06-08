@@ -7,7 +7,7 @@ import type { Db } from "../db/index.js";
 import type { Cache } from "../cache.js";
 import type { Env, Rules } from "../config.js";
 import type { Notifier } from "../notify.js";
-import type { MarketContext, StrategyKind, Direction, SignalUpdate } from "../types.js";
+import type { MarketContext, StrategyKind, Direction, Trend, SignalUpdate } from "../types.js";
 import {
   fetchOpenOutcomes,
   hydrateContextHistory,
@@ -90,10 +90,23 @@ async function evaluateOutcomeEdge(
     confidence: o.original_confidence,
     funding_percentile: o.original_factors?.funding_percentile ?? 50,
     oi_zscore: o.original_factors?.oi_zscore ?? 0,
+    trend: (o.original_factors?.trend as Trend | undefined) ?? "neutral",
+    structure_intact: o.original_factors?.structure_intact ?? true,
+    direction,
   };
-  const { state, reasons } = classifyEdgeState(original, live, lc);
+  const cls = classifyEdgeState(original, live, lc);
+  const reasons = cls.reasons;
 
   const now = new Date();
+
+  // Grace period: don't INVALIDATE a freshly created signal on a transient pass —
+  // hold at EDGE_WEAKENING until it has aged past invalidate_grace_min.
+  let state = cls.state;
+  const ageMin = (now.getTime() - new Date(o.opened_at).getTime()) / 60_000;
+  if (state === "INVALIDATED" && ageMin < lc.invalidate_grace_min) {
+    state = "EDGE_WEAKENING";
+  }
+
   const stateChanged = state !== o.edge_state;
 
   // ── History write gate (bound row growth) ────────────────────────────────────

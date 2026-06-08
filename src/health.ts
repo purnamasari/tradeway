@@ -38,11 +38,23 @@ interface HealthConfig {
   ai: boolean;
   /** Optional WS-feed liveness provider; absent when running in REST mode. */
   feedStatus?: () => FeedStatus;
+  /** Default lookback (days) for GET /analytics when no ?days= is given. */
+  analyticsDefaultDays?: number;
 }
 
 const startedAt = Date.now();
 const symbolHealth = new Map<string, SymbolHealth>();
 let config: HealthConfig | null = null;
+
+// Analytics provider, registered after the DB connects (the health server starts
+// before it). When unset, GET /analytics returns 503.
+type AnalyticsProvider = (days: number) => Promise<unknown>;
+let analyticsProvider: AnalyticsProvider | null = null;
+
+/** Wire the analytics report builder once the DB is available. */
+export function setAnalyticsProvider(fn: AnalyticsProvider): void {
+  analyticsProvider = fn;
+}
 
 function entryFor(symbol: string): SymbolHealth {
   let e = symbolHealth.get(symbol);
@@ -152,13 +164,34 @@ export function startHealthServer(
   config = cfg;
 
   const server = createServer((req, res) => {
-    const url = (req.url ?? "/").split("?")[0];
+    const rawUrl = req.url ?? "/";
+    const url = rawUrl.split("?")[0];
     if (url === "/health" || url === "/healthz" || url === "/") {
       const report = buildReport();
       const code = report.status === "unhealthy" ? 503 : 200;
       const body = JSON.stringify(report, null, 2);
       res.writeHead(code, { "content-type": "application/json" });
       res.end(body);
+      return;
+    }
+    if (url === "/analytics") {
+      if (!analyticsProvider) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "analytics unavailable (no database)" }));
+        return;
+      }
+      const daysParam = new URL(rawUrl, "http://localhost").searchParams.get("days");
+      const days = daysParam != null && Number.isFinite(Number(daysParam)) ? Number(daysParam) : config?.analyticsDefaultDays ?? 30;
+      analyticsProvider(days)
+        .then((report) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(report, null, 2));
+        })
+        .catch((err: Error) => {
+          logger.warn(`[health] /analytics failed: ${err.message}`);
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        });
       return;
     }
     res.writeHead(404, { "content-type": "application/json" });

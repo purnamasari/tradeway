@@ -92,12 +92,19 @@ export interface EdgeOriginal {
   confidence: number;
   funding_percentile: number;
   oi_zscore: number;
+  trend: Trend; // trend at signal creation
+  structure_intact: boolean; // structure quality at signal creation
+  direction: Direction;
 }
 
 /**
- * Classify edge health from original vs live. Conservative: one soft failure is
- * EDGE_WEAKENING; INVALIDATED requires `invalidate_min_failures` soft failures OR a
- * critical condition (live confidence at/below the floor).
+ * Classify edge health from original vs live. Strictly **regression-based**: a
+ * condition is only a failure if it HELD at signal creation and has since failed —
+ * never an absolute check. (A squeeze may be emitted counter-trend, a setup may
+ * start with imperfect structure; neither is deterioration. A trend drifting to
+ * *neutral* is not a reversal.) Conservative: one soft failure is EDGE_WEAKENING;
+ * INVALIDATED requires `invalidate_min_failures` soft failures OR a critical
+ * condition (live confidence at/below the floor).
  */
 export function classifyEdgeState(
   original: EdgeOriginal,
@@ -106,9 +113,18 @@ export function classifyEdgeState(
 ): { state: EdgeState; reasons: string[] } {
   const soft: string[] = [];
 
+  // Regime was permitted at the gate, so losing it is always a true regression.
   if (!live.regime_aligned) soft.push("Regime no longer supports strategy");
-  if (!live.trend_aligned) soft.push("Trend alignment lost");
-  if (!live.structure_intact) soft.push("Structure broken");
+
+  // Trend: only a failure if it was aligned at creation AND has since reversed to
+  // the opposite side. Drifting to neutral does not count (that is mild, and shows
+  // up via confidence, not as an invalidating reversal).
+  const origTrendAligned = trendAligns(original.direction, original.trend);
+  const trendReversed = original.direction === "long" ? live.trend === "bearish" : live.trend === "bullish";
+  if (origTrendAligned && trendReversed) soft.push("Trend reversed");
+
+  // Structure: only a failure if it was intact at creation and has since broken.
+  if (original.structure_intact && !live.structure_intact) soft.push("Structure broken");
 
   const drop = original.confidence - live.confidence;
   if (drop >= t.weakening_confidence_drop) {
