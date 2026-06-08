@@ -15,9 +15,9 @@ import { fetchCandles, fetchTicker, fetchFundingHistory, fetchOIHistory } from "
 import { applyKline, intervalsBehind, type KlineUpdate } from "./candle-buffer.js";
 import { logger } from "../logger.js";
 
-const BYBIT_INTERVAL: Record<Timeframe, string> = { "1m": "1", "15m": "15", "4h": "240" };
-const INTERVAL_TO_TF: Record<string, Timeframe> = { "1": "1m", "15": "15m", "240": "4h" };
-const INTERVAL_SEC: Record<Timeframe, number> = { "1m": 60, "15m": 900, "4h": 14_400 };
+const BYBIT_INTERVAL: Record<Timeframe, string> = { "1m": "1", "15m": "15", "1h": "60" };
+const INTERVAL_TO_TF: Record<string, Timeframe> = { "1": "1m", "15": "15m", "60": "1h" };
+const INTERVAL_SEC: Record<Timeframe, number> = { "1m": 60, "15m": 900, "1h": 3_600 };
 
 const BUFFER_CAP = 250; // keep a little more than the 200 indicators need
 const SEED_LIMIT = 200;
@@ -28,7 +28,7 @@ const SUB_CHUNK = 10; // Bybit caps args per subscribe frame
 interface SymbolState {
   candles1m: Candle[];
   candles15m: Candle[];
-  candles4h: Candle[];
+  candles1h: Candle[];
   lastPrice: number | null;
   fundingRate: number | null;
   openInterest: number | null;
@@ -41,7 +41,7 @@ function emptyState(): SymbolState {
   return {
     candles1m: [],
     candles15m: [],
-    candles4h: [],
+    candles1h: [],
     lastPrice: null,
     fundingRate: null,
     openInterest: null,
@@ -95,10 +95,10 @@ export class MarketFeed {
 
   private async seedSymbol(symbol: string): Promise<void> {
     try {
-      const [c1m, c15m, c4h, ticker, funding, oi] = await Promise.all([
+      const [c1m, c15m, c1h, ticker, funding, oi] = await Promise.all([
         fetchCandles(symbol, "1m", this.category, SEED_LIMIT),
         fetchCandles(symbol, "15m", this.category, SEED_LIMIT),
-        fetchCandles(symbol, "4h", this.category, SEED_LIMIT),
+        fetchCandles(symbol, "1h", this.category, SEED_LIMIT),
         fetchTicker(symbol, this.category),
         fetchFundingHistory(symbol, this.category, SEED_LIMIT),
         fetchOIHistory(symbol, this.category, SEED_LIMIT),
@@ -106,7 +106,7 @@ export class MarketFeed {
       const st = this.states.get(symbol) ?? emptyState();
       st.candles1m = c1m;
       st.candles15m = c15m;
-      st.candles4h = c4h;
+      st.candles1h = c1h;
       st.lastPrice = ticker.lastPrice;
       st.fundingRate = ticker.fundingRate;
       st.openInterest = ticker.openInterest;
@@ -288,7 +288,7 @@ export class MarketFeed {
       symbol,
       candles1m: st.candles1m,
       candles15m: st.candles15m,
-      candles4h: st.candles4h,
+      candles1h: st.candles1h,
       fundingRate: st.fundingRate,
       openInterest: st.openInterest,
       fundingHistory: st.fundingHistory,

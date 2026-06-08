@@ -15,7 +15,7 @@ interface Deps {
 
 export async function classifyTrend(
   symbol: string,
-  candles4h: Candle[],
+  candles1h: Candle[],
   ema20: number,
   ema50: number,
   deps: Deps,
@@ -32,7 +32,7 @@ export async function classifyTrend(
     ] as const) {
       try {
         const result = await withTimeout(
-          callGemini(model, deps.geminiApiKey, symbol, candles4h, ema20, ema50),
+          callGemini(model, deps.geminiApiKey, symbol, candles1h, ema20, ema50),
           timeoutMs,
         );
         if (result.confidence >= deps.rules.confidence_floor) {
@@ -48,18 +48,18 @@ export async function classifyTrend(
   }
 
   // ── Tier 3: EMA/ADX rule fallback ───────────────────────────────────────────
-  const fallback = emaAdxTrendClassifier(candles4h, ema20, ema50);
+  const fallback = emaAdxTrendClassifier(candles1h, ema20, ema50);
   await deps.cache.setex(cacheKey, 600, JSON.stringify(fallback));
   return fallback;
 }
 
 export function emaAdxTrendClassifier(
-  candles4h: Candle[],
+  candles1h: Candle[],
   ema20: number,
   ema50: number,
 ): TrendResult {
-  const price = candles4h.at(-1)?.close ?? NaN;
-  const adxVal = adx(candles4h, 14);
+  const price = candles1h.at(-1)?.close ?? NaN;
+  const adxVal = adx(candles1h, 14);
   const emaSpreadPct = ema50 === 0 ? 0 : Math.abs(ema20 - ema50) / ema50;
 
   let trend: TrendResult["trend"];
@@ -80,7 +80,7 @@ async function callGemini(
   model: string,
   apiKey: string,
   symbol: string,
-  candles4h: Candle[],
+  candles1h: Candle[],
   ema20: number,
   ema50: number,
 ): Promise<TrendResult> {
@@ -91,16 +91,16 @@ async function callGemini(
     generationConfig: { responseMimeType: "application/json", temperature: 0.1, maxOutputTokens: 256 },
   });
 
-  const recent = candles4h.slice(-20).map((c) => ({
+  const recent = candles1h.slice(-20).map((c) => ({
     o: c.open,
     h: c.high,
     l: c.low,
     c: c.close,
     v: Math.round(c.volume),
   }));
-  const price = candles4h.at(-1)?.close ?? 0;
+  const price = candles1h.at(-1)?.close ?? 0;
 
-  const prompt = `You are a crypto market-structure classifier. Given the last 20 4H candles for ${symbol}, classify the 4H momentum direction.
+  const prompt = `You are a crypto market-structure classifier. Given the last 20 1H candles for ${symbol}, classify the 1H momentum direction.
 Current price: ${price}
 EMA20: ${ema20.toFixed(4)}  EMA50: ${ema50.toFixed(4)}
 Candles (OHLCV, oldest first): ${JSON.stringify(recent)}

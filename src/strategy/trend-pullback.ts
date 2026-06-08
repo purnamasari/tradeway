@@ -19,7 +19,7 @@ import { scoreConfidence, scoreSetupQuality } from "../scoring.js";
 import { widenStopToAtr } from "../risk.js";
 
 const PULLBACK_TOLERANCE = 0.005; // price within 0.5% of S/R level counts as "at the level"
-const HTF_TOLERANCE = 0.005; // 4H level within 0.5% of 15m level => aligned
+const HTF_TOLERANCE = 0.005; // 1H EMA within 0.5% of the S/R level => aligned
 const LOOKBACK_1M = 10; // how far back in 1m candles to look for the pullback touch
 
 export interface DetectResult {
@@ -113,9 +113,9 @@ export function detectTrendPullback(
   const rr = risk === 0 ? 0 : reward / risk;
 
   // ── Scoring ────────────────────────────────────────────────────────────────
-  const ema20_4h = ema(ctx.candles4h.map((c) => c.close), 20);
-  const htfAligned = Number.isFinite(ema20_4h)
-    ? Math.abs(ema20_4h - level.price) / level.price <= HTF_TOLERANCE
+  const ema20_1h = ema(ctx.candles1h.map((c) => c.close), 20);
+  const htfAligned = Number.isFinite(ema20_1h)
+    ? Math.abs(ema20_1h - level.price) / level.price <= HTF_TOLERANCE
     : false;
 
   const prevCandle = c1m[c1m.indexOf(bounceCandle) - 1] ?? touchCandle;

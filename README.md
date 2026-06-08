@@ -1,9 +1,16 @@
 # tradeaway
 
 Crypto signal bot — MVP implementing **Blueprint v3**. Scans a watchlist of
-perpetuals on Bybit, classifies market regime and 4H trend, runs strategy
+perpetuals on Bybit, classifies market regime and 1H trend, runs strategy
 detectors, scores each setup on two independent axes, and emits explainable
 alerts.
+
+**Trading style: daytrade.** Every timeframe and timer is aligned to one horizon —
+intraday, flat within a session. The stack: **1m** = entry trigger, **15m** =
+structure + regime, **1h** = higher-timeframe bias (the trend classifier). Scans run
+every 5 min; positions are expected to resolve within ~6h. (The earlier 4h bias was the
+cause of perpetually "neutral" trends — a 4h read barely moves inside a ≤4h trade, so it
+never committed to a direction. 1h commits.)
 
 This is the **end-to-end thin slice**: one full pipeline proving the
 architecture. It runs **keyless** out of the box — public Bybit REST needs no
@@ -15,7 +22,7 @@ configured.
 
 ```
 Bybit market data ──▶ Regime Engine ──▶ AI Trend Classifier ──▶ S/R Engine
-   (1m/15m/4h,          (rule-based:        (Gemini → fallback:    (swing pivots,
+   (1m/15m/1h,          (rule-based:        (Gemini → fallback:    (swing pivots,
     funding, OI)         ADX/ATR/EMA)        EMA/ADX rules)         clustered, scored)
                               │                    │                     │
                               └──────────┬─────────┴──────────┬──────────┘
@@ -31,7 +38,7 @@ Two components answer **different** questions and never override each other:
 | Component | Question | How |
 |-----------|----------|-----|
 | **Regime Engine** | "What strategy fits current conditions?" | Pure math (ADX, ATR percentile, EMA spread). No AI. |
-| **AI Trend Classifier** | "Which way is 4H momentum going?" | Gemini 2.5 Flash → Flash-Lite → EMA/ADX rule fallback. |
+| **AI Trend Classifier** | "Which way is 1H momentum going?" | Gemini 2.5 Flash → Flash-Lite → EMA/ADX rule fallback. |
 | **S/R Engine** | "Where are key horizontal support/resistance levels?" | Swing pivots, clustered, strength scored. |
 | **Outcome Evaluator** | "Did active signals hit entry, TP, SL, or expire?" | 1-minute polling of ticker price against active outcomes in DB. |
 | **Edge Monitor** | "Does an active signal's original edge still hold?" | 1-minute recompute of confidence/structure/trend; tracks `ACTIVE → EDGE_WEAKENING → INVALIDATED`. |
@@ -43,7 +50,7 @@ A signal needs both to agree (e.g. `regime=ranging` **AND** `trend=bullish` →
 
 | Strategy | Regime Gate | Pattern |
 |----------|-------------|---------|
-| **momentum** | `trending`/`ranging`/`high_volatility` | Fast directional move (≥`min_move_pct` over `lookback_1m` 1m candles, volume-confirmed) — *rides* the move; blocked only if the 4h trend is strictly opposite |
+| **momentum** | `trending`/`ranging`/`high_volatility` | Fast directional move (≥`min_move_pct` over `lookback_1m` 1m candles, volume-confirmed) — *rides* the move; blocked only if the 1h trend is strictly opposite |
 | **liquidity_sweep** | `ranging` | Wick sweeps S/R level, then reclaims (bounce) |
 | **trend_pullback** | `trending` | Price pulls back to S/R, then bounces in trend direction |
 | **squeeze** | `high_volatility` | Extreme funding (percentile) + open interest shift — **disabled by default** (`squeeze.enabled`), counter-trend fade pending evidence |
@@ -164,15 +171,15 @@ pnpm test:chart
 ```
 
 `--mock` generates synthetic candles crafted to land in a ranging regime with a
-bullish 4H trend and a fresh support sweep+reclaim — i.e. a textbook
+bullish 1H trend and a fresh support sweep+reclaim — i.e. a textbook
 `liquidity_sweep LONG` — so you can see the full pipeline produce an alert
 without waiting for live conditions to line up.
 
 `--mock --mock-scenario=pullback` generates a trending regime with a bullish
-4H trend and a pullback-to-support pattern — producing a `trend_pullback LONG`.
+1H trend and a pullback-to-support pattern — producing a `trend_pullback LONG`.
 
 `--mock --mock-scenario=squeeze` generates a high-volatility regime with a bullish/bearish
-4H trend and extreme funding/OI deviations — producing a `squeeze LONG/SHORT`.
+1H trend and extreme funding/OI deviations — producing a `squeeze LONG/SHORT`.
 
 Mock mode automatically disables external services (Gemini, Telegram, Redis,
 Postgres) so tests are fully isolated and deterministic.

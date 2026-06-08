@@ -57,7 +57,7 @@ export async function recordMetrics(
   if (!db) return;
   try {
     const closes15m = ctx.candles15m.map((c) => c.close);
-    const closes4h = ctx.candles4h.map((c) => c.close);
+    const closes1h = ctx.candles1h.map((c) => c.close);
     const lastCandle = ctx.candles15m.at(-1);
 
     await db.insert(metricHistory).values({
@@ -67,8 +67,8 @@ export async function recordMetrics(
       atr: atr(ctx.candles15m, 14),
       adx: adx(ctx.candles15m, 14),
       volume_15m: lastCandle?.volume ?? null,
-      ema20: ema(closes4h, 20),
-      ema50: ema(closes4h, 50),
+      ema20: ema(closes1h, 20),
+      ema50: ema(closes1h, 50),
       price: lastCandle?.close ?? 0,
     });
   } catch (err) {

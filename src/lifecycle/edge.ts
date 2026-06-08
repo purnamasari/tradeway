@@ -21,7 +21,7 @@ import { buildSR } from "../strategy/sr-engine.js";
 import { scoreConfidence, scoreSetupQuality } from "../scoring.js";
 import { ema } from "../indicators.js";
 
-const HTF_TOLERANCE = 0.005; // 4H EMA within 0.5% of the level => aligned (mirrors detectors)
+const HTF_TOLERANCE = 0.005; // 1H EMA within 0.5% of the level => aligned (mirrors detectors)
 
 function trendAligns(direction: Direction, trend: Trend): boolean {
   return direction === "long" ? trend === "bullish" : trend === "bearish";
@@ -43,10 +43,10 @@ export async function computeEdgeSnapshot(
   const regime = classifyRegime(ctx.candles15m, rules.regime, ctx.atrHistory);
   const regimeAligned = regime.allowedStrategies.includes(strategy);
 
-  const closes4h = ctx.candles4h.map((c) => c.close);
-  const ema20 = ema(closes4h, rules.regime.ema_fast);
-  const ema50 = ema(closes4h, rules.regime.ema_slow);
-  const trend = await classifyTrend(ctx.symbol, ctx.candles4h, ema20, ema50, {
+  const closes1h = ctx.candles1h.map((c) => c.close);
+  const ema20 = ema(closes1h, rules.regime.ema_fast);
+  const ema50 = ema(closes1h, rules.regime.ema_slow);
+  const trend = await classifyTrend(ctx.symbol, ctx.candles1h, ema20, ema50, {
     cache,
     rules: rules.trend,
     geminiApiKey: env.geminiApiKey,

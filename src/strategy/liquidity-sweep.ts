@@ -19,7 +19,7 @@ import { scoreConfidence, scoreSetupQuality } from "../scoring.js";
 import { widenStopToAtr } from "../risk.js";
 
 const SWEEP_PENETRATION = 0.001; // 0.1% beyond the level counts as a sweep
-const HTF_TOLERANCE = 0.005; // 4H level within 0.5% of 15m level => aligned
+const HTF_TOLERANCE = 0.005; // 1H EMA within 0.5% of the S/R level => aligned
 
 export interface DetectResult {
   signal: Signal | null;
@@ -105,9 +105,9 @@ export function detectLiquiditySweep(
 
   // ── Scoring ─────────────────────────────────────────────────────────────────
   const closes15m = ctx.candles15m.map((c) => c.close);
-  const ema20_4h = ema(ctx.candles4h.map((c) => c.close), 20);
-  const htfAligned = Number.isFinite(ema20_4h)
-    ? Math.abs(ema20_4h - level.price) / level.price <= HTF_TOLERANCE
+  const ema20_1h = ema(ctx.candles1h.map((c) => c.close), 20);
+  const htfAligned = Number.isFinite(ema20_1h)
+    ? Math.abs(ema20_1h - level.price) / level.price <= HTF_TOLERANCE
     : false;
 
   // Sweep wick ratio: rejected wick vs body of the sweep candle.

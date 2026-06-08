@@ -26,10 +26,10 @@ async function main() {
   // Generate a sweep scenario for BTCUSDT
   const ctx = await buildMockContext("BTCUSDT", "linear", "sweep");
   const regime = classifyRegime(ctx.candles15m, rules.regime, ctx.atrHistory);
-  const closes4h = ctx.candles4h.map((c) => c.close);
-  const ema20 = ema(closes4h, rules.regime.ema_fast);
-  const ema50 = ema(closes4h, rules.regime.ema_slow);
-  const trend = await classifyTrend("BTCUSDT", ctx.candles4h, ema20, ema50, {
+  const closes1h = ctx.candles1h.map((c) => c.close);
+  const ema20 = ema(closes1h, rules.regime.ema_fast);
+  const ema50 = ema(closes1h, rules.regime.ema_slow);
+  const trend = await classifyTrend("BTCUSDT", ctx.candles1h, ema20, ema50, {
     cache,
     rules: rules.trend,
   });

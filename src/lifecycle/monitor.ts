@@ -54,7 +54,7 @@ export async function monitorEdges(deps: EdgeMonitorDeps): Promise<void> {
       logger.warn(`[edge] context build failed for ${symbol}: ${(err as Error).message}`);
       continue;
     }
-    if (ctx.candles15m.length < 60 || ctx.candles4h.length < 60) {
+    if (ctx.candles15m.length < 60 || ctx.candles1h.length < 60) {
       logger.warn(`[edge] ${symbol}: insufficient candle history, skipping`);
       continue;
     }

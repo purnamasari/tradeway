@@ -94,7 +94,7 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
   let threw = false;
   try {
     const ctx = await deps.getContext(asset.symbol, env.bybitCategory);
-    if (ctx.candles15m.length < 60 || ctx.candles4h.length < 60) {
+    if (ctx.candles15m.length < 60 || ctx.candles1h.length < 60) {
       logger.warn(`[scan] ${asset.symbol}: insufficient candle history, skipping`);
       return `${asset.symbol}: insufficient candle history`;
     }
@@ -106,10 +106,10 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
 
     const regime = classifyRegime(ctx.candles15m, rules.regime, ctx.atrHistory);
 
-    const closes4h = ctx.candles4h.map((c) => c.close);
-    const ema20 = ema(closes4h, rules.regime.ema_fast);
-    const ema50 = ema(closes4h, rules.regime.ema_slow);
-    const trend = await classifyTrend(asset.symbol, ctx.candles4h, ema20, ema50, {
+    const closes1h = ctx.candles1h.map((c) => c.close);
+    const ema20 = ema(closes1h, rules.regime.ema_fast);
+    const ema50 = ema(closes1h, rules.regime.ema_slow);
+    const trend = await classifyTrend(asset.symbol, ctx.candles1h, ema20, ema50, {
       cache,
       rules: rules.trend,
       geminiApiKey: env.geminiApiKey,

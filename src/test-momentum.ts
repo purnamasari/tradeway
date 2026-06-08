@@ -42,7 +42,7 @@ function ctxWith(c1m: Candle[]): MarketContext {
     symbol: "TESTUSDT",
     candles1m: c1m,
     candles15m: candles15m(),
-    candles4h: [],
+    candles1h: [],
     fundingRate: 0,
     openInterest: 0,
     fundingHistory: [],
@@ -83,7 +83,7 @@ const flat = detectMomentum(ctxWith(flat1m()), regime, trendNeutral, sr, rules);
 ok("rejects a flat series", flat.signal === null, flat.reason);
 
 const opposed = detectMomentum(ctxWith(spike1m()), regime, trendBearish, sr, rules);
-ok("blocks a long spike when 4h trend is strictly bearish", opposed.signal === null, opposed.reason);
+ok("blocks a long spike when 1h trend is strictly bearish", opposed.signal === null, opposed.reason);
 
 console.log(`\n${failures === 0 ? "ALL PASSED" : `${failures} FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

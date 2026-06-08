@@ -5,7 +5,7 @@
 //
 // Gating:
 //   regime must allow momentum (every live regime does — see regime/engine.ts)
-//   HTF guard: block only if the 4h trend is *strictly opposite* the move.
+//   HTF guard: block only if the 1h trend is *strictly opposite* the move.
 import type {
   MarketContext,
   RegimeResult,
@@ -75,12 +75,12 @@ export function detectMomentum(
     return { signal: null, reason: `volume ${volRatio.toFixed(2)}x < ${cfg.vol_mult}x avg` };
   }
 
-  // HTF guard: only block a move that fights a committed 4h trend.
+  // HTF guard: only block a move that fights a committed 1h trend.
   if (direction === "long" && trend.trend === "bearish") {
-    return { signal: null, reason: "long blocked — 4h trend bearish" };
+    return { signal: null, reason: "long blocked — 1h trend bearish" };
   }
   if (direction === "short" && trend.trend === "bullish") {
-    return { signal: null, reason: "short blocked — 4h trend bullish" };
+    return { signal: null, reason: "short blocked — 1h trend bullish" };
   }
 
   // ── Trade levels ────────────────────────────────────────────────────────────
