@@ -139,6 +139,27 @@ filter on `opened_at`; win-rate counts only resolved (`TP_HIT`/`SL_HIT`) outcome
 
 Validate the formatters offline (no DB) with `pnpm test:analytics`.
 
+### Backtesting
+
+Before trusting a detection change with live money, replay it over history:
+
+```bash
+pnpm backtest -- --symbols=BTCUSDT,ETHUSDT --days=14 --step=5
+```
+
+The harness (`src/backtest/`) is **read-only and isolated** — it reuses the *real* detectors,
+regime engine, S/R, and scoring (deterministic: EMA/ADX trend, no Gemini, no DB), rebuilds a
+`MarketContext` at every 5-min step from fetched 1m/15m/1h + funding/OI, and simulates each
+signal's outcome on 1m highs/lows. It reports per-strategy **fill-rate, win-rate, expectancy
+(avg R), profit factor, drawdown**, and **confidence calibration**. Flags: `--days`, `--step`,
+`--symbols`, `--fee_pct`, `--slippage_pct`, `--json`.
+
+**Assumptions (results are directional, not exact):** 1m-granularity fills with **SL-first on an
+ambiguous candle** (pessimistic); fees + slippage deducted; funding/OI REST granularity is coarser
+than 15m so percentile windows are approximate; trend uses EMA/ADX only (live Gemini may differ);
+no liquidity/partial-fill modeling. Needs Bybit public REST reachable (runs on the VPS or locally).
+Validate the fill model offline with `pnpm test:backtest`.
+
 ## Quick start
 
 ```bash
@@ -393,6 +414,11 @@ src/
   analytics/
     queries.ts              read-only win-rate / calibration / edge-validation / factor aggregations
     report.ts               assembles AnalyticsReport + text (CLI) and digest (Telegram) formatters
+  backtest/
+    engine.ts               replays history through the real detectors (read-only reuse)
+    simulate.ts             1m-granularity fill model (SL-first, fees+slippage)
+    report.ts               per-strategy expectancy / win-rate / calibration report
+    run.ts                  CLI entry (pnpm backtest)
   regime/engine.ts          rule-based regime classifier
   ai/trend-classifier.ts    3-tier trend classifier (Gemini → fallback)
   strategy/
