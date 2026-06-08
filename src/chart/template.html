@@ -102,6 +102,7 @@
   if (!data) return;
 
   const { candles, signal } = data;
+  const overlay = data.overlay || { markers: [], projectionLine: [], zones: [] };
 
   // ── Header ──────────────────────────────────────────────────────────
   document.getElementById('hdr-symbol').textContent = signal.symbol;
@@ -223,6 +224,58 @@
   entryAreaLower.setData(chartCandles.map(function (c) {
     return { time: c.time, value: signal.entry_low };
   }));
+
+  // ── Expected-path overlay ───────────────────────────────────────────
+  // Shaded watch zones (e.g. pullback support/resistance band). Reuses the
+  // two-area-series fill trick: an upper band over a background-colored lower.
+  overlay.zones.forEach(function (zone) {
+    if (zone == null || !isFinite(zone.from) || !isFinite(zone.to)) return;
+    var hi = Math.max(zone.from, zone.to);
+    var lo = Math.min(zone.from, zone.to);
+    var upper = chart.addAreaSeries({
+      topColor: zone.color, bottomColor: zone.color,
+      lineColor: 'rgba(0,0,0,0)', lineWidth: 1,
+      priceScaleId: '', lastValueVisible: false, priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    upper.setData(chartCandles.map(function (c) { return { time: c.time, value: hi }; }));
+    var lower = chart.addAreaSeries({
+      topColor: 'rgba(10, 10, 10, 1)', bottomColor: 'rgba(10, 10, 10, 1)',
+      lineColor: 'rgba(0,0,0,0)', lineWidth: 1,
+      priceScaleId: '', lastValueVisible: false, priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    lower.setData(chartCandles.map(function (c) { return { time: c.time, value: lo }; }));
+  });
+
+  // Dotted projection from entry toward TP, extending past the last candle.
+  if (overlay.projectionLine && overlay.projectionLine.length > 1) {
+    var projSeries = chart.addLineSeries({
+      color: '#a3e635',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    projSeries.setData(overlay.projectionLine.map(function (p) {
+      return { time: p.time, value: p.value };
+    }));
+    legendItems.push({ color: '#a3e635', label: 'Expected path → TP' });
+  }
+
+  // Markers anchored to real candle times (sweep / reclaim / entry / trigger).
+  if (overlay.markers && overlay.markers.length) {
+    candleSeries.setMarkers(overlay.markers.map(function (m) {
+      return {
+        time: m.time,
+        position: m.position,
+        shape: m.shape,
+        color: m.color,
+        text: m.text || '',
+      };
+    }));
+  }
 
   // ── Legend ──────────────────────────────────────────────────────────
   var legendEl = document.getElementById('legend');

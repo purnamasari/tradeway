@@ -97,6 +97,36 @@ export interface Signal {
   detected_at: number;
 }
 
+// ── Expected-path chart overlay ────────────────────────────────────────────
+// Calculated per strategy from a Signal + the rendered candle series. Anchors
+// markers to real candle times and projects a dotted path from entry to TP so
+// the reader can approve/reject the setup at a glance.
+export interface PathMarker {
+  time: number; // unix seconds — must match a rendered candle's time
+  position: "aboveBar" | "belowBar";
+  shape: "arrowUp" | "arrowDown" | "circle" | "square";
+  color: string;
+  text?: string;
+}
+
+export interface PathPoint {
+  time: number; // unix seconds
+  value: number; // price
+}
+
+export interface PathZone {
+  from: number; // price
+  to: number; // price
+  color: string; // rgba fill
+  label?: string;
+}
+
+export interface PathOverlay {
+  markers: PathMarker[];
+  projectionLine: PathPoint[];
+  zones: PathZone[];
+}
+
 // Per-symbol market data assembled once per scan.
 export interface MarketContext {
   symbol: string;

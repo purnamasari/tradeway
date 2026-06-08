@@ -5,11 +5,13 @@
 // `page.evaluateOnNewDocument`. A shared browser instance is reused across
 // renders, launched lazily on the first call.
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { logger } from "../logger.js";
-import type { Signal, Candle } from "../types.js";
+import { calculatePath } from "./path-calculator.js";
+import type { Signal, Candle, PathOverlay } from "../types.js";
 
 const TEMPLATE_PATH = join(dirname(fileURLToPath(import.meta.url)), "template.html");
 
@@ -54,10 +56,67 @@ function findChrome(): string | undefined {
       "/usr/bin/google-chrome-stable",
       "/usr/bin/chromium-browser",
       "/usr/bin/chromium",
+      "/snap/bin/chromium",
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ];
     for (const p of candidates) {
       if (existsSync(p)) return p;
+    }
+  }
+
+  // Last resort: a Chrome-for-Testing installed into puppeteer's cache by
+  // `@puppeteer/browsers install chrome` (what the deploy does). puppeteer-core
+  // does NOT bundle a browser, so on a server with no system Chrome this cache
+  // is the only one available.
+  return findPuppeteerCacheChrome();
+}
+
+/**
+ * Discover a Chrome binary under puppeteer's browser cache
+ * (`$PUPPETEER_CACHE_DIR` or `~/.cache/puppeteer/chrome/<build>/<platform>/…`).
+ * Returns the newest installed build, or undefined if none.
+ */
+function findPuppeteerCacheChrome(): string | undefined {
+  // Roots where `@puppeteer/browsers install` may have placed Chrome:
+  //  - PUPPETEER_CACHE_DIR (explicit override)
+  //  - ~/.cache/puppeteer  (what the deploy uses, and puppeteer's own default)
+  //  - <cwd>               (the CLI's default --path when none is given)
+  const roots = [
+    process.env.PUPPETEER_CACHE_DIR,
+    join(homedir(), ".cache", "puppeteer"),
+    process.cwd(),
+  ].filter((r): r is string => Boolean(r));
+
+  const isWin = process.platform === "win32";
+  const isMac = process.platform === "darwin";
+
+  for (const root of roots) {
+    const chromeRoot = join(root, "chrome");
+    if (!existsSync(chromeRoot)) continue;
+
+    let builds: string[];
+    try {
+      builds = readdirSync(chromeRoot).sort().reverse(); // newest build first
+    } catch {
+      continue;
+    }
+
+    for (const build of builds) {
+      const buildDir = join(chromeRoot, build);
+      let platformDirs: string[];
+      try {
+        platformDirs = readdirSync(buildDir);
+      } catch {
+        continue;
+      }
+      for (const pd of platformDirs) {
+        const candidate = isWin
+          ? join(buildDir, pd, "chrome.exe")
+          : isMac
+            ? join(buildDir, pd, "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing")
+            : join(buildDir, pd, "chrome");
+        if (existsSync(candidate)) return candidate;
+      }
     }
   }
   return undefined;
@@ -76,7 +135,9 @@ async function getBrowser(): Promise<Browser> {
     const chromePath = findChrome();
     if (!chromePath) {
       throw new Error(
-        "Chrome not found. Install Google Chrome or set CHROME_PATH env var.",
+        "Chrome not found — charts fall back to text-only alerts. Install a browser " +
+          "(`pnpm chrome:install`, or `npx @puppeteer/browsers install chrome@stable`) " +
+          "or set CHROME_PATH to a system Chrome/Chromium.",
       );
     }
 
@@ -93,10 +154,16 @@ async function getBrowser(): Promise<Browser> {
       timeout: LAUNCH_TIMEOUT_MS,
     });
     _browser = browser;
-    _launching = null;
     logger.info(`[chart] Browser launched (${chromePath})`);
     return browser;
   })();
+  // Clear the in-flight promise whether it settled or threw, so the next call
+  // either reuses _browser (success) or retries cleanly (e.g. after a browser is
+  // installed) instead of being stuck on a stale/rejected promise forever.
+  _launching.then(
+    () => { _launching = null; },
+    () => { _launching = null; },
+  );
   return _launching;
 }
 
@@ -131,6 +198,7 @@ interface ChartData {
     tp: number;
     snapshot: Signal["snapshot"];
   };
+  overlay: PathOverlay;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -153,9 +221,13 @@ export async function renderChart(
     try {
       await page.setViewport({ width: CHART_WIDTH, height: CHART_HEIGHT, deviceScaleFactor: 2 });
 
-      // Inject chart data before the template JS runs.
+      // Inject chart data before the template JS runs. The overlay is computed
+      // against the *same* sliced series the chart renders, so marker/projection
+      // times anchor to visible candles.
+      const visibleCandles = candles.slice(-80); // Last 80 candles — readable at 800px
       const chartData: ChartData = {
-        candles: candles.slice(-80), // Last 80 candles — readable at 800px
+        candles: visibleCandles,
+        overlay: calculatePath(signal, visibleCandles),
         signal: {
           symbol: signal.symbol,
           strategy: signal.strategy,
