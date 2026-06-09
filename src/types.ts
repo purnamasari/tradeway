@@ -122,10 +122,39 @@ export interface PathZone {
   label?: string;
 }
 
+// A filled horizontal price band (entry zone, risk/reward shading, S/R zones, and
+// future overlays: FVG boxes, order blocks, liquidity zones). The renderer draws
+// each as a non-occluding baseline fill, so adding a new overlay type is just
+// another band with its own `kind`/color — no layout change required.
+export type BandKind =
+  | "entry"
+  | "reward"
+  | "risk"
+  | "support"
+  | "resistance"
+  | "fvg"
+  | "order_block"
+  | "liquidity";
+
+export interface PathBand {
+  from: number; // price (lower or upper — renderer normalizes)
+  to: number; // price
+  color: string; // rgba fill
+  kind: BandKind;
+  label?: string;
+}
+
 export interface PathOverlay {
   markers: PathMarker[];
   projectionLine: PathPoint[];
+  /** Colour of the projection line/arrow (direction-aware: green long, red short). */
+  projectionColor?: string;
+  /** @deprecated superseded by `bands`; kept for back-compat, always []. */
   zones: PathZone[];
+  /** Filled price bands (entry / risk / reward / S-R zones / future overlays). */
+  bands: PathBand[];
+  /** Detected-feature chips to render (LONG, MOMENTUM, VOLUME SPIKE, …). */
+  tags: string[];
 }
 
 // Per-symbol market data assembled once per scan.

@@ -1,22 +1,38 @@
-// Expected-path overlay calculator.
+// Expected-path + overlay calculator.
 //
 // Given an approved Signal and the candle series the chart actually renders,
-// produce per-strategy overlay data: markers anchored to real candle times, a
-// dotted projection from entry to TP, and (where useful) a shaded watch zone.
+// produce the overlay the template draws: filled price bands (entry / risk /
+// reward / S-R zones), a dotted projection from entry to TP, markers anchored to
+// real candle times, and the detected-feature tag chips.
 //
-// This runs on the *rendered* timeframe (15m), not 1m — so every marker lands on
-// a visible candle and the projection extends along the chart's own time axis.
-// The blueprint's reference logic is 1m-based; the intent is preserved here while
-// the time anchoring is adapted to what the viewer sees.
-import type { Candle, PathOverlay, Signal } from "../types.js";
+// Runs on the *rendered* timeframe (15m), so every marker lands on a visible
+// candle. The band/marker/tag model is intentionally generic: new overlay types
+// (FVG boxes, order blocks, liquidity zones, BOS markers) slot in as more bands or
+// markers without touching the renderer layout.
+import type { Candle, PathOverlay, PathBand, Signal } from "../types.js";
 
 // How many candle-widths the dotted projection spans before reaching TP. Only
-// affects the slope of the line; squeezes are fast so they reach TP sooner.
+// affects the slope of the line; fast strategies reach TP sooner.
 const PROJECTION_STEPS: Record<Signal["strategy"], number> = {
   liquidity_sweep: 12,
   trend_pullback: 16,
   squeeze: 6,
   momentum: 6,
+};
+
+// Direction-aware projection colour.
+const LONG_GREEN = "#4ade80";
+const SHORT_RED = "#f87171";
+
+// Half-width of an S/R zone as a fraction of the level price.
+const SR_ZONE_HALF = 0.003; // ±0.3%
+
+/** Human label for the trigger-candle marker, per strategy. */
+const TRIGGER_LABEL: Record<Signal["strategy"], string> = {
+  momentum: "Momentum Break",
+  squeeze: "Squeeze Break",
+  trend_pullback: "Pullback Entry",
+  liquidity_sweep: "Entry",
 };
 
 /** Seconds between candles in the rendered series (defaults to 15m). */
@@ -48,17 +64,84 @@ function projectToTarget(
 }
 
 /**
- * Compute the expected-path overlay for a signal against the candle series the
- * chart renders. Returns empty arrays for unknown strategies — the chart simply
- * draws nothing extra.
+ * Common filled bands every signal gets: the entry zone, the red risk band
+ * (entry→SL), the green reward band (entry→TP), and S/R zones when present.
+ * The renderer draws these behind the candles as semi-transparent fills.
+ */
+function buildBands(signal: Signal): PathBand[] {
+  const entryMid = (signal.entry_low + signal.entry_high) / 2;
+  const bands: PathBand[] = [
+    { from: entryMid, to: signal.tp, color: "rgba(34, 197, 94, 0.13)", kind: "reward", label: "Reward" },
+    { from: entryMid, to: signal.sl, color: "rgba(239, 68, 68, 0.13)", kind: "risk", label: "Risk" },
+    { from: signal.entry_low, to: signal.entry_high, color: "rgba(250, 204, 21, 0.20)", kind: "entry", label: "Entry Zone" },
+  ];
+
+  const support = signal.snapshot.support?.price;
+  if (support != null && Number.isFinite(support)) {
+    bands.push({
+      from: support * (1 - SR_ZONE_HALF),
+      to: support * (1 + SR_ZONE_HALF),
+      color: "rgba(56, 189, 248, 0.12)",
+      kind: "support",
+      label: "Support",
+    });
+  }
+  const resistance = signal.snapshot.resistance?.price;
+  if (resistance != null && Number.isFinite(resistance)) {
+    bands.push({
+      from: resistance * (1 - SR_ZONE_HALF),
+      to: resistance * (1 + SR_ZONE_HALF),
+      color: "rgba(168, 85, 247, 0.12)",
+      kind: "resistance",
+      label: "Resistance",
+    });
+  }
+  return bands;
+}
+
+/**
+ * Detected-feature chips. Only includes what the detectors actually found — no
+ * fabricated FVG/BOS tags (those aren't computed yet). Driven by score_breakdown.
+ */
+function buildTags(signal: Signal): string[] {
+  const b = signal.score_breakdown;
+  const tags = [signal.direction.toUpperCase(), signal.strategy.replace(/_/g, " ").toUpperCase()];
+  if (b.volume_percentile >= 80) tags.push("VOLUME SPIKE");
+  if (b.htf_aligned) tags.push("HTF ALIGNED");
+  if (b.funding_percentile <= 10 || b.funding_percentile >= 90) tags.push("FUNDING EDGE");
+  if (Math.abs(b.oi_zscore) >= 2) tags.push("OI SPIKE");
+  if (b.sweep_wick_ratio && b.sweep_wick_ratio > 0) tags.push("SWEEP");
+  if (b.structure_intact) tags.push("STRUCTURE");
+  return tags;
+}
+
+/**
+ * Compute the full overlay for a signal against the candle series the chart
+ * renders. Bands + tags are common to all strategies; markers + projection are
+ * strategy-specific.
  */
 export function calculatePath(signal: Signal, candles: Candle[]): PathOverlay {
-  const empty: PathOverlay = { markers: [], projectionLine: [], zones: [] };
-  if (candles.length === 0) return empty;
+  const base = (markers: PathOverlay["markers"]): PathOverlay => ({
+    markers,
+    projectionLine: projectToTarget(
+      candles,
+      (signal.entry_low + signal.entry_high) / 2,
+      signal.tp,
+      PROJECTION_STEPS[signal.strategy] ?? 12,
+    ),
+    projectionColor: signal.direction === "long" ? LONG_GREEN : SHORT_RED,
+    zones: [],
+    bands: buildBands(signal),
+    tags: buildTags(signal),
+  });
 
-  const entryPrice = (signal.entry_low + signal.entry_high) / 2;
-  const steps = PROJECTION_STEPS[signal.strategy] ?? 12;
+  if (candles.length === 0) {
+    return { markers: [], projectionLine: [], zones: [], bands: [], tags: [] };
+  }
+
   const isLong = signal.direction === "long";
+  const entryShape = isLong ? "arrowUp" : "arrowDown";
+  const triggerLabel = TRIGGER_LABEL[signal.strategy] ?? "Entry";
 
   switch (signal.strategy) {
     case "liquidity_sweep": {
@@ -76,7 +159,7 @@ export function calculatePath(signal: Signal, candles: Candle[]): PathOverlay {
             position: isLong ? "belowBar" : "aboveBar",
             shape: isLong ? "arrowDown" : "arrowUp",
             color: "#f87171",
-            text: "sweep",
+            text: "Sweep",
           });
           // First candle after the sweep that closed back across the level.
           const reclaim = candles
@@ -88,7 +171,7 @@ export function calculatePath(signal: Signal, candles: Candle[]): PathOverlay {
               position: isLong ? "aboveBar" : "belowBar",
               shape: "circle",
               color: "#facc15",
-              text: "reclaim",
+              text: "Reclaim",
             });
           }
         }
@@ -101,70 +184,43 @@ export function calculatePath(signal: Signal, candles: Candle[]): PathOverlay {
         markers.push({
           time: candles.at(-1)!.time,
           position: isLong ? "belowBar" : "aboveBar",
-          shape: isLong ? "arrowUp" : "arrowDown",
+          shape: entryShape,
           color: "#facc15",
-          text: "entry",
+          text: triggerLabel,
         });
       }
-
-      return {
-        markers,
-        projectionLine: projectToTarget(candles, entryPrice, signal.tp, steps),
-        zones: [], // entry band is already drawn by the template
-      };
+      return base(markers);
     }
 
     case "trend_pullback": {
-      const level = isLong ? signal.snapshot.support?.price : signal.snapshot.resistance?.price;
       const trigger = candles.at(-1)!;
-
-      const zones: PathOverlay["zones"] =
-        level != null && isFinite(level)
-          ? [
-              {
-                from: level * 0.995,
-                to: level * 1.005,
-                color: isLong ? "rgba(74, 222, 128, 0.08)" : "rgba(248, 113, 113, 0.08)",
-                label: isLong ? "Support" : "Resistance",
-              },
-            ]
-          : [];
-
-      return {
-        markers: [
-          {
-            time: trigger.time,
-            position: isLong ? "aboveBar" : "belowBar",
-            shape: isLong ? "arrowUp" : "arrowDown",
-            color: "#4ade80",
-            text: "entry",
-          },
-        ],
-        projectionLine: projectToTarget(candles, entryPrice, signal.tp, steps),
-        zones,
-      };
+      return base([
+        {
+          time: trigger.time,
+          position: isLong ? "belowBar" : "aboveBar",
+          shape: entryShape,
+          color: "#4ade80",
+          text: triggerLabel,
+        },
+      ]);
     }
 
     case "squeeze":
     case "momentum": {
       const trigger = candles.at(-1)!;
-      return {
-        markers: [
-          {
-            time: trigger.time,
-            position: isLong ? "belowBar" : "aboveBar",
-            shape: isLong ? "arrowUp" : "arrowDown",
-            color: "#c084fc",
-            text: signal.strategy === "momentum" ? "momentum" : "squeeze",
-          },
-        ],
-        projectionLine: projectToTarget(candles, entryPrice, signal.tp, steps),
-        zones: [],
-      };
+      return base([
+        {
+          time: trigger.time,
+          position: isLong ? "belowBar" : "aboveBar",
+          shape: entryShape,
+          color: "#c084fc",
+          text: triggerLabel,
+        },
+      ]);
     }
 
     default:
-      return empty;
+      return base([]);
   }
 }
 
