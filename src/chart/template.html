@@ -6,92 +6,109 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    background: #0a0a0a;
+    background: #0b0e11;
     width: 800px;
-    height: 500px;
+    height: 600px;
     overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
-  #chart { width: 800px; height: 500px; position: relative; }
+  #chart { width: 800px; height: 600px; position: relative; }
 
-  /* ── Header overlay ───────────────────────────────────────────────── */
-  #header {
+  /* ── Trade summary card (top-left) ─────────────────────────────────── */
+  #summary {
     position: absolute;
-    top: 0; left: 0; right: 0;
+    top: 12px; left: 12px;
     z-index: 10;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 16px;
-    background: linear-gradient(180deg, rgba(10,10,10,0.92) 0%, rgba(10,10,10,0.6) 80%, transparent 100%);
+    background: rgba(17, 22, 28, 0.86);
+    border: 1px solid #232a33;
+    border-radius: 8px;
+    padding: 9px 12px;
     pointer-events: none;
+    backdrop-filter: blur(2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
   }
-  #header .symbol {
-    font-size: 15px;
-    font-weight: 800;
-    color: #f0f0f0;
-    letter-spacing: -0.02em;
+  #summary .head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+  #summary .symbol { font-size: 16px; font-weight: 800; color: #f4f6f8; letter-spacing: -0.02em; }
+  #summary .dir {
+    font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;
   }
-  #header .badge {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 4px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-  #header .direction-long  { background: #0d2e1a; color: #4ade80; border: 1px solid #166534; }
-  #header .direction-short { background: #2e0d0d; color: #f87171; border: 1px solid #7f1d1d; }
-  #header .strategy        { background: #0d1b2e; color: #60a5fa; border: 1px solid #1e3a5f; }
+  #summary .dir.long  { background: #0d2e1a; color: #4ade80; border: 1px solid #166534; }
+  #summary .dir.short { background: #2e0d0d; color: #f87171; border: 1px solid #7f1d1d; }
+  #summary .rows { display: grid; grid-template-columns: auto auto; gap: 2px 14px; font-size: 11.5px; }
+  #summary .rows .k { color: #7b8794; }
+  #summary .rows .v { color: #e7ebef; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+  #summary .rows .v.tp { color: #4ade80; }
+  #summary .rows .v.sl { color: #f87171; }
+  #summary .rows .v.entry { color: #facc15; }
 
-  #header .stats {
-    margin-left: auto;
-    display: flex;
-    gap: 12px;
-    font-size: 11px;
-    color: #9ca3af;
-  }
-  #header .stats span { white-space: nowrap; }
-  #header .stats .label { color: #6b7280; }
-  #header .stats .value { color: #e5e7eb; font-weight: 600; }
-
-  /* ── Legend overlay (bottom-left) ──────────────────────────────────── */
-  #legend {
+  /* ── Badges (top-right) ────────────────────────────────────────────── */
+  #badges {
     position: absolute;
-    bottom: 30px; left: 12px;
+    top: 12px; right: 12px;
     z-index: 10;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    align-items: flex-end;
+    gap: 6px;
+    pointer-events: none;
+  }
+  #badges .row { display: flex; gap: 6px; align-items: center; }
+  #badges .conf {
+    font-size: 13px; font-weight: 800; padding: 4px 10px; border-radius: 6px;
+    border: 1px solid; font-variant-numeric: tabular-nums;
+  }
+  #badges .conf.hi  { background: #0d2e1a; color: #4ade80; border-color: #166534; }
+  #badges .conf.mid { background: #2e2810; color: #facc15; border-color: #854d0e; }
+  #badges .conf.lo  { background: #2e0d0d; color: #f87171; border-color: #7f1d1d; }
+  #badges .rr {
+    font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 6px;
+    background: #0d1b2e; color: #60a5fa; border: 1px solid #1e3a5f;
+  }
+  /* tag chips */
+  #tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; max-width: 360px; }
+  #tags .tag {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 2px 6px; border-radius: 4px;
+    background: rgba(30, 38, 48, 0.9); color: #9fb0c0; border: 1px solid #2b343f;
+  }
+  #tags .tag.long  { background: #0d2e1a; color: #4ade80; border-color: #166534; }
+  #tags .tag.short { background: #2e0d0d; color: #f87171; border-color: #7f1d1d; }
+  #tags .tag.hot   { background: #2a1e10; color: #fb923c; border-color: #7c3a12; }
+
+  /* ── Legend (bottom-left) ──────────────────────────────────────────── */
+  #legend {
+    position: absolute;
+    bottom: 118px; left: 12px;
+    z-index: 10;
+    display: flex;
+    gap: 12px;
     pointer-events: none;
     font-size: 10px;
-    color: #6b7280;
+    color: #7b8794;
   }
-  #legend .item {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  #legend .swatch {
-    width: 14px;
-    height: 2px;
-    border-radius: 1px;
-    flex-shrink: 0;
-  }
+  #legend .item { display: flex; align-items: center; gap: 5px; }
+  #legend .swatch { width: 12px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  #legend .line { width: 14px; height: 0; border-top: 2px dotted; flex-shrink: 0; }
 </style>
 </head>
 <body>
 <div id="chart">
-  <div id="header">
-    <span class="symbol" id="hdr-symbol"></span>
-    <span class="badge strategy" id="hdr-strategy"></span>
-    <span class="badge" id="hdr-direction"></span>
-    <div class="stats">
-      <span><span class="label">Conf </span><span class="value" id="hdr-conf"></span></span>
-      <span><span class="label">Quality </span><span class="value" id="hdr-quality"></span></span>
-      <span><span class="label">RR </span><span class="value" id="hdr-rr"></span></span>
+  <div id="summary">
+    <div class="head">
+      <span class="symbol" id="sum-symbol"></span>
+      <span class="dir" id="sum-dir"></span>
     </div>
+    <div class="rows" id="sum-rows"></div>
   </div>
+
+  <div id="badges">
+    <div class="row">
+      <span class="rr" id="badge-rr"></span>
+      <span class="conf" id="badge-conf"></span>
+    </div>
+    <div id="tags"></div>
+  </div>
+
   <div id="legend"></div>
 </div>
 
@@ -102,203 +119,190 @@
   if (!data) return;
 
   const { candles, signal } = data;
-  const overlay = data.overlay || { markers: [], projectionLine: [], zones: [] };
+  const overlay = data.overlay || { markers: [], projectionLine: [], bands: [], tags: [] };
+  const bands = overlay.bands || [];
+  const tags = overlay.tags || [];
+  const TRANSPARENT = 'rgba(0,0,0,0)';
 
-  // ── Header ──────────────────────────────────────────────────────────
-  document.getElementById('hdr-symbol').textContent = signal.symbol;
-  document.getElementById('hdr-strategy').textContent = signal.strategy.replace(/_/g, ' ');
+  function formatPrice(p) {
+    if (p == null || !isFinite(p)) return '—';
+    if (p >= 1000) return p.toFixed(2);
+    if (p >= 1) return p.toFixed(4);
+    return p.toFixed(6);
+  }
 
-  const dirEl = document.getElementById('hdr-direction');
+  // ── Summary card ────────────────────────────────────────────────────
+  document.getElementById('sum-symbol').textContent = signal.symbol;
+  const dirEl = document.getElementById('sum-dir');
   dirEl.textContent = signal.direction.toUpperCase();
-  dirEl.className = 'badge direction-' + signal.direction;
+  dirEl.className = 'dir ' + signal.direction;
 
-  document.getElementById('hdr-conf').textContent = signal.confidence + '/100';
-  document.getElementById('hdr-quality').textContent = signal.setup_quality + '/100';
-  document.getElementById('hdr-rr').textContent = '1:' + signal.rr;
+  const entryMid = (signal.entry_low + signal.entry_high) / 2;
+  const rowsEl = document.getElementById('sum-rows');
+  [
+    ['Entry', formatPrice(signal.entry_low) + ' – ' + formatPrice(signal.entry_high), 'entry'],
+    ['Stop', formatPrice(signal.sl), 'sl'],
+    ['Target', formatPrice(signal.tp), 'tp'],
+    ['Quality', signal.setup_quality + ' / 100', ''],
+  ].forEach(function (r) {
+    rowsEl.insertAdjacentHTML('beforeend',
+      '<span class="k">' + r[0] + '</span><span class="v ' + r[2] + '">' + r[1] + '</span>');
+  });
+
+  // ── Badges: RR + confidence (thresholded colour) + tags ─────────────
+  document.getElementById('badge-rr').textContent = 'RR 1:' + signal.rr;
+  const confEl = document.getElementById('badge-conf');
+  confEl.textContent = signal.confidence + '%';
+  confEl.classList.add(signal.confidence >= 80 ? 'hi' : signal.confidence >= 60 ? 'mid' : 'lo');
+
+  const tagsEl = document.getElementById('tags');
+  const HOT = { 'VOLUME SPIKE': 1, 'OI SPIKE': 1, 'FUNDING EDGE': 1, 'SWEEP': 1 };
+  tags.forEach(function (t) {
+    var cls = 'tag';
+    if (t === 'LONG') cls += ' long';
+    else if (t === 'SHORT') cls += ' short';
+    else if (HOT[t]) cls += ' hot';
+    var el = document.createElement('span');
+    el.className = cls;
+    el.textContent = t;
+    tagsEl.appendChild(el);
+  });
 
   // ── Chart ───────────────────────────────────────────────────────────
   const chart = LightweightCharts.createChart(document.getElementById('chart'), {
     width: 800,
-    height: 500,
+    height: 600,
     layout: {
-      background: { type: 'solid', color: '#0a0a0a' },
-      textColor: '#6b7280',
+      background: { type: 'solid', color: '#0b0e11' },
+      textColor: '#8b97a4',
       fontSize: 11,
     },
     grid: {
-      vertLines: { color: '#141414' },
-      horzLines: { color: '#141414' },
+      vertLines: { color: '#15191e' },
+      horzLines: { color: '#15191e' },
     },
     crosshair: { mode: LightweightCharts.CrosshairMode.Hidden },
     rightPriceScale: {
-      borderColor: '#1f1f1f',
-      scaleMargins: { top: 0.12, bottom: 0.06 },
+      borderColor: '#1f262e',
+      scaleMargins: { top: 0.16, bottom: 0.26 }, // top: header overlays · bottom: volume panel
     },
     timeScale: {
-      borderColor: '#1f1f1f',
+      borderColor: '#1f262e',
       timeVisible: true,
       secondsVisible: false,
-      rightOffset: 3,
-      barSpacing: 8,
+      rightOffset: 6,
+      barSpacing: 7,
     },
     handleScroll: false,
     handleScale: false,
   });
 
-  // Candlestick series
-  const candleSeries = chart.addCandlestickSeries({
-    upColor: '#22c55e',
-    downColor: '#ef4444',
-    borderUpColor: '#22c55e',
-    borderDownColor: '#ef4444',
-    wickUpColor: '#22c55e80',
-    wickDownColor: '#ef444480',
-  });
-
-  // Convert candles to Lightweight Charts format
-  const chartCandles = candles.map(function (c) {
-    return { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
-  });
-  candleSeries.setData(chartCandles);
-
-  // ── Price lines ─────────────────────────────────────────────────────
-  const legendItems = [];
-
-  function addPriceLine(price, color, title, lineWidth, lineStyle) {
-    if (price == null || !isFinite(price)) return;
-    candleSeries.createPriceLine({
-      price: price,
-      color: color,
-      lineWidth: lineWidth || 1,
-      lineStyle: lineStyle != null ? lineStyle : LightweightCharts.LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: title,
-    });
-    legendItems.push({ color: color, label: title + ': ' + formatPrice(price) });
-  }
-
-  // Support
-  if (signal.snapshot && signal.snapshot.support) {
-    addPriceLine(signal.snapshot.support.price, '#22c55e', 'Support', 1, LightweightCharts.LineStyle.Dotted);
-  }
-
-  // Resistance
-  if (signal.snapshot && signal.snapshot.resistance) {
-    addPriceLine(signal.snapshot.resistance.price, '#ef4444', 'Resistance', 1, LightweightCharts.LineStyle.Dotted);
-  }
-
-  // Entry zone (midpoint line)
-  var entryMid = (signal.entry_low + signal.entry_high) / 2;
-  addPriceLine(entryMid, '#facc15', 'Entry', 2, LightweightCharts.LineStyle.Solid);
-
-  // Stop Loss
-  addPriceLine(signal.sl, '#f87171', 'SL', 1, LightweightCharts.LineStyle.Dashed);
-
-  // Take Profit
-  addPriceLine(signal.tp, '#4ade80', 'TP', 1, LightweightCharts.LineStyle.Dashed);
-
-  // ── Entry zone shading (using two baseline-like area series) ────────
-  // Upper entry band
-  var entryAreaUpper = chart.addAreaSeries({
-    topColor: 'rgba(250, 204, 21, 0.08)',
-    bottomColor: 'rgba(250, 204, 21, 0.08)',
-    lineColor: 'rgba(250, 204, 21, 0.25)',
-    lineWidth: 1,
-    priceScaleId: '',
-    lastValueVisible: false,
-    priceLineVisible: false,
-  });
-  entryAreaUpper.setData(chartCandles.map(function (c) {
-    return { time: c.time, value: signal.entry_high };
-  }));
-
-  var entryAreaLower = chart.addAreaSeries({
-    topColor: 'rgba(10, 10, 10, 1)',
-    bottomColor: 'rgba(10, 10, 10, 1)',
-    lineColor: 'rgba(250, 204, 21, 0.25)',
-    lineWidth: 1,
-    priceScaleId: '',
-    lastValueVisible: false,
-    priceLineVisible: false,
-  });
-  entryAreaLower.setData(chartCandles.map(function (c) {
-    return { time: c.time, value: signal.entry_low };
-  }));
-
-  // ── Expected-path overlay ───────────────────────────────────────────
-  // Shaded watch zones (e.g. pullback support/resistance band). Reuses the
-  // two-area-series fill trick: an upper band over a background-colored lower.
-  overlay.zones.forEach(function (zone) {
-    if (zone == null || !isFinite(zone.from) || !isFinite(zone.to)) return;
-    var hi = Math.max(zone.from, zone.to);
-    var lo = Math.min(zone.from, zone.to);
-    var upper = chart.addAreaSeries({
-      topColor: zone.color, bottomColor: zone.color,
-      lineColor: 'rgba(0,0,0,0)', lineWidth: 1,
-      priceScaleId: '', lastValueVisible: false, priceLineVisible: false,
-      crosshairMarkerVisible: false,
-    });
-    upper.setData(chartCandles.map(function (c) { return { time: c.time, value: hi }; }));
-    var lower = chart.addAreaSeries({
-      topColor: 'rgba(10, 10, 10, 1)', bottomColor: 'rgba(10, 10, 10, 1)',
-      lineColor: 'rgba(0,0,0,0)', lineWidth: 1,
-      priceScaleId: '', lastValueVisible: false, priceLineVisible: false,
-      crosshairMarkerVisible: false,
-    });
-    lower.setData(chartCandles.map(function (c) { return { time: c.time, value: lo }; }));
-  });
-
-  // Dotted projection from entry toward TP, extending past the last candle.
-  if (overlay.projectionLine && overlay.projectionLine.length > 1) {
-    var projSeries = chart.addLineSeries({
-      color: '#a3e635',
-      lineWidth: 2,
-      lineStyle: LightweightCharts.LineStyle.Dotted,
+  // ── Filled bands (drawn FIRST so candles paint on top — no occlusion) ──
+  // Each band is a baseline series: fill lives between the flat line (hi) and the
+  // baseline (lo), using the semi-transparent top fill. This generalizes entry /
+  // risk / reward / S-R zones and any future overlay (FVG, order blocks, …).
+  bands.forEach(function (b) {
+    if (b == null || !isFinite(b.from) || !isFinite(b.to)) return;
+    var hi = Math.max(b.from, b.to);
+    var lo = Math.min(b.from, b.to);
+    var s = chart.addBaselineSeries({
+      baseValue: { type: 'price', price: lo },
+      topFillColor1: b.color,
+      topFillColor2: b.color,
+      topLineColor: TRANSPARENT,
+      bottomFillColor1: TRANSPARENT,
+      bottomFillColor2: TRANSPARENT,
+      bottomLineColor: TRANSPARENT,
+      priceScaleId: 'right',
       lastValueVisible: false,
       priceLineVisible: false,
       crosshairMarkerVisible: false,
     });
+    s.setData(candles.map(function (c) { return { time: c.time, value: hi }; }));
+  });
+
+  // ── Candlesticks ────────────────────────────────────────────────────
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#26a69a',
+    downColor: '#ef5350',
+    borderUpColor: '#26a69a',
+    borderDownColor: '#ef5350',
+    wickUpColor: '#26a69a',
+    wickDownColor: '#ef5350',
+    priceScaleId: 'right',
+  });
+  candleSeries.setData(candles.map(function (c) {
+    return { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
+  }));
+
+  // ── Price lines (axis-labelled) ─────────────────────────────────────
+  function addPriceLine(price, color, title, lineWidth, lineStyle) {
+    if (price == null || !isFinite(price)) return;
+    candleSeries.createPriceLine({
+      price: price, color: color, lineWidth: lineWidth || 1,
+      lineStyle: lineStyle != null ? lineStyle : LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: title,
+    });
+  }
+  if (signal.snapshot && signal.snapshot.support) {
+    addPriceLine(signal.snapshot.support.price, '#38bdf8', 'Support', 1, LightweightCharts.LineStyle.Dotted);
+  }
+  if (signal.snapshot && signal.snapshot.resistance) {
+    addPriceLine(signal.snapshot.resistance.price, '#a855f7', 'Resistance', 1, LightweightCharts.LineStyle.Dotted);
+  }
+  addPriceLine(signal.tp, '#4ade80', 'TP', 1, LightweightCharts.LineStyle.Dashed);
+  addPriceLine(entryMid, '#facc15', 'Entry', 2, LightweightCharts.LineStyle.Solid);
+  addPriceLine(signal.sl, '#f87171', 'SL', 1, LightweightCharts.LineStyle.Dashed);
+
+  // ── Expected-path projection (direction-aware, dotted) ──────────────
+  if (overlay.projectionLine && overlay.projectionLine.length > 1) {
+    var projSeries = chart.addLineSeries({
+      color: overlay.projectionColor || '#a3e635',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+      priceScaleId: 'right',
+    });
     projSeries.setData(overlay.projectionLine.map(function (p) {
       return { time: p.time, value: p.value };
     }));
-    legendItems.push({ color: '#a3e635', label: 'Expected path → TP' });
   }
 
-  // Markers anchored to real candle times (sweep / reclaim / entry / trigger).
+  // ── Trigger / sweep / reclaim markers ───────────────────────────────
   if (overlay.markers && overlay.markers.length) {
     candleSeries.setMarkers(overlay.markers.map(function (m) {
-      return {
-        time: m.time,
-        position: m.position,
-        shape: m.shape,
-        color: m.color,
-        text: m.text || '',
-      };
+      return { time: m.time, position: m.position, shape: m.shape, color: m.color, text: m.text || '' };
     }));
   }
 
-  // ── Legend ──────────────────────────────────────────────────────────
-  var legendEl = document.getElementById('legend');
-  legendItems.forEach(function (item) {
-    var div = document.createElement('div');
-    div.className = 'item';
-    div.innerHTML =
-      '<span class="swatch" style="background:' + item.color + '"></span>' +
-      '<span>' + item.label + '</span>';
-    legendEl.appendChild(div);
+  // ── Volume panel (bottom ~18%, own price scale) ─────────────────────
+  var vols = candles.map(function (c) { return c.volume || 0; });
+  var meanVol = vols.reduce(function (a, b) { return a + b; }, 0) / (vols.length || 1);
+  var spikeThreshold = meanVol * 2.2; // bright bar + "VOLUME SPIKE" tag share this idea
+  var volSeries = chart.addHistogramSeries({
+    priceScaleId: 'volume',
+    priceFormat: { type: 'volume' },
+    lastValueVisible: false,
+    priceLineVisible: false,
   });
+  volSeries.setData(candles.map(function (c) {
+    var spike = (c.volume || 0) >= spikeThreshold;
+    var up = c.close >= c.open;
+    var color = spike ? 'rgba(251,146,60,0.9)' : up ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)';
+    return { time: c.time, value: c.volume || 0, color: color };
+  }));
+  chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
 
-  // Fit content
+  // ── Legend (bottom-left) ────────────────────────────────────────────
+  var legendEl = document.getElementById('legend');
+  legendEl.innerHTML =
+    '<div class="item"><span class="swatch" style="background:rgba(34,197,94,0.5)"></span>Reward</div>' +
+    '<div class="item"><span class="swatch" style="background:rgba(239,68,68,0.5)"></span>Risk</div>' +
+    '<div class="item"><span class="swatch" style="background:rgba(250,204,21,0.6)"></span>Entry</div>' +
+    '<div class="item"><span class="line" style="border-color:' + (overlay.projectionColor || '#a3e635') + '"></span>Path → TP</div>';
+
   chart.timeScale().fitContent();
-
-  // Signal we're ready for screenshot
   window.__CHART_READY__ = true;
-
-  function formatPrice(p) {
-    if (p >= 1000) return p.toFixed(2);
-    if (p >= 1) return p.toFixed(4);
-    return p.toFixed(6);
-  }
 })();
 </script>
 </body>

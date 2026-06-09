@@ -16,7 +16,7 @@ import type { Signal, Candle, PathOverlay } from "../types.js";
 const TEMPLATE_PATH = join(dirname(fileURLToPath(import.meta.url)), "template.html");
 
 const CHART_WIDTH = 800;
-const CHART_HEIGHT = 500;
+const CHART_HEIGHT = 600;
 const READY_TIMEOUT_MS = 8_000;
 const LAUNCH_TIMEOUT_MS = 15_000;
 
