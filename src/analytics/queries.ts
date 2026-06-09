@@ -161,3 +161,43 @@ export async function durations(db: NonNullable<Db>, days: number): Promise<Dura
     .where(resolvedInWindow(days));
   return rows[0] ?? { tpMs: null, slMs: null };
 }
+
+// ── Manual trades (autodetected Bybit positions) ──────────────────────────────
+// Tracked separately from signal performance: these are the user's own trades, with
+// no bot thesis, so mixing them into signal win-rate would be misleading. A CLOSED
+// row's realized PnL% is derived from entry vs the exit price recorded at close.
+
+export interface ManualTradesSummary {
+  open: number;
+  closed: number;
+  wins: number; // closed with PnL > 0
+  losses: number; // closed with PnL < 0
+  avgPnlPct: number | null;
+}
+
+/** source='bybit' rows in the window (always followed=true; window filters opened_at). */
+function manualInWindow(days: number): SQL {
+  const isManual = eq(signalOutcomes.source, "bybit");
+  if (days <= 0) return isManual;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  return and(isManual, gte(signalOutcomes.opened_at, cutoff)) as SQL;
+}
+
+export async function manualTrades(db: NonNullable<Db>, days: number): Promise<ManualTradesSummary> {
+  // Realized PnL% at close, direction-aware (entry vs recorded exit/hit_price).
+  const pnl = sql`case when ${signalOutcomes.direction} = 'long'
+      then (${signalOutcomes.hit_price} - ${signalOutcomes.entry_price}) / ${signalOutcomes.entry_price} * 100
+      else (${signalOutcomes.entry_price} - ${signalOutcomes.hit_price}) / ${signalOutcomes.entry_price} * 100 end`;
+  const closed = sql`${signalOutcomes.status} = 'CLOSED'`;
+  const rows = await db
+    .select({
+      open: sql<number>`count(*) filter (where ${signalOutcomes.status} in ('PENDING_ENTRY','ACTIVE'))::int`,
+      closed: sql<number>`count(*) filter (where ${closed})::int`,
+      wins: sql<number>`count(*) filter (where ${closed} and ${pnl} > 0)::int`,
+      losses: sql<number>`count(*) filter (where ${closed} and ${pnl} < 0)::int`,
+      avgPnlPct: sql<number | null>`avg(${pnl}) filter (where ${closed})::float8`,
+    })
+    .from(signalOutcomes)
+    .where(manualInWindow(days));
+  return rows[0] ?? { open: 0, closed: 0, wins: 0, losses: 0, avgPnlPct: null };
+}

@@ -37,6 +37,7 @@ const report: AnalyticsReport = {
   confidenceDecay: { winnersDecay: 6.2, losersDecay: 21.7 },
   factorEffectiveness: { winFunding: 91.3, lossFunding: 64.8, winOiZscore: -2.8, lossOiZscore: -1.1 },
   durations: { tpMs: 2.6 * 3600_000, slMs: 1.9 * 3600_000 },
+  manualTrades: { open: 1, closed: 3, wins: 2, losses: 1, avgPnlPct: 3.41 },
 };
 
 console.log(formatReportText(report));

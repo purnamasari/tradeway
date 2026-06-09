@@ -75,6 +75,10 @@ export const signals = pgTable(
     // Human action via the Telegram Follow/Skip buttons (null = undecided).
     decision: text("decision"), // 'followed' | 'skipped'
     decided_at: timestamp("decided_at", { withTimezone: true }),
+    // Telegram message of the alert, so edge updates can edit it in place (no spam).
+    // is_photo selects editMessageCaption (chart alert) vs editMessageText (text alert).
+    alert_message_id: integer("alert_message_id"),
+    alert_is_photo: boolean("alert_is_photo").notNull().default(false),
   },
   (t) => [
     index("idx_signal_symbol_time").on(t.symbol, t.detected_at),
@@ -112,6 +116,11 @@ export const signalOutcomes = pgTable(
     strategy: text("strategy").notNull(),
     direction: text("direction").notNull(),
     status: text("status").notNull().default("PENDING_ENTRY"),
+    // Provenance of the tracked trade. 'signal' = a detected signal the user Followed
+    // (or a shadow). 'bybit' = a real open position autodetected from the exchange
+    // (signal_id is a 0 sentinel for these; there is no FK). Bybit rows are exited by
+    // the position reconciler when the position disappears, not by the price tracker.
+    source: text("source").notNull().default("signal"),
     // A followed outcome is a real tracked trade; a shadow outcome (followed=false,
     // created when a signal is Skipped) is evaluated silently for counterfactual data
     // but is excluded from edge monitoring, notifications, and the active-slot check.
@@ -144,6 +153,11 @@ export const signalOutcomes = pgTable(
     // signal_edge_updates write-gate bookkeeping (avoid row bloat).
     last_edge_record_at: timestamp("last_edge_record_at", { withTimezone: true }),
     last_recorded_confidence: integer("last_recorded_confidence"),
+    // Telegram message to edit in place on each update (edge update for signals, live
+    // PnL refresh for Bybit positions) — so a single message tracks the trade's life
+    // instead of a new message per change. is_photo selects caption vs text edit.
+    notify_message_id: integer("notify_message_id"),
+    notify_is_photo: boolean("notify_is_photo").notNull().default(false),
   },
   (t) => [
     index("idx_outcome_status").on(t.status),

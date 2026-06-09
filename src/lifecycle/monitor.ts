@@ -7,6 +7,7 @@ import type { Db } from "../db/index.js";
 import type { Cache } from "../cache.js";
 import type { Env, Rules } from "../config.js";
 import type { Notifier } from "../notify.js";
+import { formatSignalStatus } from "../notify.js";
 import type { MarketContext, StrategyKind, Direction, Trend, SignalUpdate } from "../types.js";
 import {
   fetchOpenOutcomes,
@@ -33,8 +34,13 @@ export async function monitorEdges(deps: EdgeMonitorDeps): Promise<void> {
   const { db, getContext, category, rules } = deps;
   if (!db) return;
 
-  // Only real (followed) signals get edge monitoring; shadows are price-only.
-  const outcomes = await fetchOpenOutcomes(db, { followedOnly: true });
+  // Only real (followed) signals get edge monitoring; shadows are price-only, and
+  // autodetected Bybit positions (source='bybit') have no bot thesis to validate —
+  // their regime/strategy alignment is undefined ('manual'), so edge classification
+  // would spuriously flag them. They are tracked for PnL only (see reconciler).
+  const outcomes = (await fetchOpenOutcomes(db, { followedOnly: true })).filter(
+    (o) => o.source !== "bybit",
+  );
   if (outcomes.length === 0) return;
 
   // One context build per unique symbol (max one open outcome per symbol anyway).
@@ -106,6 +112,16 @@ async function evaluateOutcomeEdge(
   const ageMin = (now.getTime() - new Date(o.opened_at).getTime()) / 60_000;
   if (state === "INVALIDATED" && ageMin < lc.invalidate_grace_min) {
     state = "EDGE_WEAKENING";
+  }
+
+  // INVALIDATED is terminal. Once a signal's edge is invalidated it never recovers:
+  // the edge has failed, and the trade now lives or dies on price alone (the outcome
+  // tracker still owns the TP/SL/expiry exit). Without this latch the state would
+  // flap WEAKENING↔INVALIDATED as live confidence wanders around the floor, and every
+  // flap is a stateChange → a redundant Telegram update. Latch it so the user gets
+  // exactly one INVALIDATED notification, then silence.
+  if (o.edge_state === "INVALIDATED") {
+    state = "INVALIDATED";
   }
 
   const stateChanged = state !== o.edge_state;
@@ -198,7 +214,13 @@ async function evaluateOutcomeEdge(
       reasons,
     };
     try {
-      await notifier.sendSignalUpdate(update);
+      // Anti-spam: edit the original alert message in place when we have its id;
+      // only fall back to a fresh message if we never captured one.
+      if (o.notify_message_id != null) {
+        await notifier.editMessage(o.notify_message_id, o.notify_is_photo, formatSignalStatus(o, update));
+      } else {
+        await notifier.sendSignalUpdate(update);
+      }
     } catch (err) {
       logger.warn(`[edge] update notification failed for #${o.id}: ${(err as Error).message}`);
     }

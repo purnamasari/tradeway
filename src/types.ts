@@ -177,7 +177,13 @@ export interface SignalUpdate {
 }
 
 // ── Outcome tracking ─────────────────────────────────────────────────────────
-export type OutcomeStatus = "PENDING_ENTRY" | "ACTIVE" | "TP_HIT" | "SL_HIT" | "EXPIRED";
+// CLOSED is terminal for autodetected Bybit positions: the user closed the position
+// on the exchange (it disappeared). It is distinct from TP_HIT/SL_HIT — a manual close
+// is not a signal hitting its target — so it is excluded from signal win-rate analytics.
+export type OutcomeStatus = "PENDING_ENTRY" | "ACTIVE" | "TP_HIT" | "SL_HIT" | "EXPIRED" | "CLOSED";
+
+/** Where a tracked outcome came from. */
+export type OutcomeSource = "signal" | "bybit";
 
 export interface SignalOutcome {
   id: number;

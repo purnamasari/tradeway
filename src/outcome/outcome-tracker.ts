@@ -27,7 +27,10 @@ export async function evaluateOutcomes(
 ): Promise<void> {
   if (!db) return;
 
-  const outcomes = await fetchOpenOutcomes(db);
+  // Autodetected real positions (source='bybit') are exited by the position
+  // reconciler when they disappear from the exchange — never by our synthetic
+  // TP/SL/expiry. Exclude them here so we don't force-close a live position.
+  const outcomes = (await fetchOpenOutcomes(db)).filter((o) => o.source !== "bybit");
   if (outcomes.length === 0) return;
 
   // Batch price lookups — one per unique symbol.

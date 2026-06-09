@@ -21,6 +21,7 @@ import {
   recordSignal,
   createOutcome,
   fetchOpenOutcomeForSymbol,
+  setSignalAlertRef,
 } from "./db/accumulate.js";
 import { ema } from "./indicators.js";
 import { renderChart } from "./chart/renderer.js";
@@ -202,10 +203,16 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     // creates the outcome. Otherwise (console, or flag off) auto-track as before.
     const signalId = await recordSignal(db, signal);
     const followable = rules.lifecycle.require_follow && notifier.interactive && signalId !== null;
-    if (signalId !== null && !followable) {
-      await createOutcome(db, signal, signalId);
+    // Send first so we capture the Telegram message id, then persist it: edge updates
+    // EDIT this message in place rather than posting new ones. For an auto-tracked
+    // (non-followable) signal the outcome is created here with that same ref.
+    const sent = await notifier.send(signal, chartPng, { signalId: signalId ?? undefined, followable });
+    if (signalId !== null) {
+      await setSignalAlertRef(db, signalId, sent);
+      if (!followable) {
+        await createOutcome(db, signal, signalId, true, sent);
+      }
     }
-    await notifier.send(signal, chartPng, { signalId: signalId ?? undefined, followable });
 
     return (
       `${asset.symbol}: ✅ ${signal.direction} ${signal.strategy} ` +
