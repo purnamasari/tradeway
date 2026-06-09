@@ -1,7 +1,8 @@
 // Alert delivery. Sends to Telegram when configured, otherwise prints to console.
 // Supports optional chart image attachment (PNG buffer) and outcome notifications.
-import type { Signal, OutcomeStatus, SignalUpdate } from "./types.js";
+import type { Signal, OutcomeStatus, SignalUpdate, Direction } from "./types.js";
 import type { OutcomeRow } from "./db/accumulate.js";
+import type { BybitPosition } from "./data/bybit-private.js";
 import type { Env } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -84,12 +85,40 @@ export function formatSignalUpdate(u: SignalUpdate): string {
   return lines.join("\n");
 }
 
+function hhmm(d: Date): string {
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * Living status for a tracked signal — used to EDIT the original alert message in
+ * place on each edge change (instead of sending a new message). One message tracks
+ * the trade's whole life: state, confidence drift, levels, and the latest reasons.
+ */
+export function formatSignalStatus(o: OutcomeRow, u: SignalUpdate): string {
+  const dir = u.direction.toUpperCase();
+  const emoji =
+    u.edgeState === "INVALIDATED" ? "⛔" : u.edgeState === "EDGE_WEAKENING" ? "⚠" : "✅";
+  const lines = [
+    `${emoji} ${u.symbol} ${dir} · ${u.strategy} — ${u.edgeState}`,
+    ``,
+    `Confidence: ${u.original.confidence} → ${u.live.confidence}`,
+    `Entry: ${o.entry_low}–${o.entry_high} · SL: ${o.sl} · TP: ${o.tp}`,
+  ];
+  if (u.reasons.length) {
+    lines.push(``);
+    for (const r of u.reasons) lines.push(`• ${r}`);
+  }
+  lines.push(``, `Updated ${hhmm(new Date())}`);
+  return lines.join("\n");
+}
+
 // ── Outcome formatting ──────────────────────────────────────────────────────
 
 const OUTCOME_EMOJI: Record<string, string> = {
   TP_HIT: "✅",
   SL_HIT: "❌",
   EXPIRED: "⏰",
+  CLOSED: "🏁", // real Bybit position closed on the exchange
 };
 
 function formatDuration(ms: number): string {
@@ -140,10 +169,17 @@ export interface SendOptions {
   followable?: boolean;
 }
 
+/** Result of sending a message — the id to edit later, and whether it's a photo
+ *  (caption-edit) or text (text-edit). messageId is null on non-interactive channels. */
+export interface SendResult {
+  messageId: number | null;
+  isPhoto: boolean;
+}
+
 export interface Notifier {
   /** True if the channel supports inbound interaction (buttons/commands). */
   readonly interactive: boolean;
-  send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<void>;
+  send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<SendResult>;
   sendOutcome(
     outcome: OutcomeRow,
     status: OutcomeStatus,
@@ -152,6 +188,14 @@ export interface Notifier {
   ): Promise<void>;
   /** Edge-lifecycle update for an already-active signal (not a new signal). */
   sendSignalUpdate(update: SignalUpdate): Promise<void>;
+  /** Notify that a real Bybit position was autodetected and is now tracked. */
+  sendPositionTracked(position: BybitPosition, direction: Direction): Promise<SendResult>;
+  /**
+   * Edit a previously sent message in place (the anti-spam path: refresh the same
+   * message instead of posting a new one). No-op if the channel can't edit. Swallows
+   * Telegram's "message is not modified" so an unchanged refresh is harmless.
+   */
+  editMessage(messageId: number, isPhoto: boolean, text: string): Promise<void>;
   /** Pre-formatted analytics digest (scheduled performance summary). */
   sendDigest(text: string): Promise<void>;
   /**
@@ -176,6 +220,10 @@ export interface CommandHandlers {
   analytics: (days?: number) => Promise<string>;
   /** `/status` — current open signals. */
   status: () => Promise<string>;
+  /** `/running` — interactive list of everything tracked, with Details buttons. */
+  running: () => Promise<RunningView>;
+  /** Details button — full breakdown for one tracked trade by outcome id. */
+  onDetails: (outcomeId: number) => Promise<string>;
   /** `/scan SYMBOL` — force a scan; returns the result summary. */
   scan: (symbol: string) => Promise<string>;
   /** Follow button — activate (track) the signal; returns a confirmation. */
@@ -200,16 +248,122 @@ export function formatStatus(rows: OutcomeRow[]): string {
   return lines.join("\n");
 }
 
+// ── Position-tracked notification (autodetected Bybit position) ──────────────
+
+export function formatPositionTracked(p: BybitPosition, direction: Direction): string {
+  const lines = [
+    `📍 Tracking your ${p.symbol} ${direction.toUpperCase()} position`,
+    ``,
+    `Entry: ${p.avgPrice} · Size: ${p.size}`,
+  ];
+  if (p.stopLoss) lines.push(`SL: ${p.stopLoss}`);
+  if (p.takeProfit) lines.push(`TP: ${p.takeProfit}`);
+  lines.push(``, `Source: Bybit (auto-detected) — I'll report when you close it.`);
+  return lines.join("\n");
+}
+
+/**
+ * Live status for a tracked Bybit position — edited into the SAME message on each
+ * reconcile pass so there is one self-updating message per position, not a stream.
+ */
+export function formatPositionLive(
+  o: OutcomeRow,
+  markPrice: number | null,
+  unrealisedPnl: number | null,
+): string {
+  const dir = o.direction.toUpperCase();
+  const lines = [
+    `📍 ${o.symbol} ${dir} · Bybit (live)`,
+    ``,
+    `Entry: ${o.entry_price} · Size: ${o.original_factors?.size ?? "?"}`,
+  ];
+  if (markPrice != null) {
+    lines.push(`Mark: ${markPrice} · PnL: ${formatPricePct(o.entry_price, markPrice, o.direction)}`);
+  }
+  if (unrealisedPnl != null) lines.push(`uPnL: ${unrealisedPnl}`);
+  if (o.sl) lines.push(`SL: ${o.sl}`);
+  if (o.tp) lines.push(`TP: ${o.tp}`);
+  lines.push(``, `Updated ${hhmm(new Date())} · closes when you exit on Bybit`);
+  return lines.join("\n");
+}
+
+// ── Interactive /running view ────────────────────────────────────────────────
+
+/** A `/running` reply: a text body plus the trades to render as Details buttons. */
+export interface RunningView {
+  text: string;
+  trades: { id: number; label: string }[];
+}
+
+function tradeSourceTag(o: OutcomeRow): string {
+  return o.source === "bybit" ? "Bybit" : o.strategy;
+}
+
+/** Build the /running list + the per-trade button labels. */
+export function formatRunning(rows: OutcomeRow[]): RunningView {
+  if (rows.length === 0) return { text: "📡 Nothing running.", trades: [] };
+  const lines = [`📡 Running (${rows.length}):`, ""];
+  const trades: { id: number; label: string }[] = [];
+  for (const o of rows) {
+    const dir = o.direction.toUpperCase();
+    lines.push(`#${o.id} ${o.symbol} ${dir} · ${tradeSourceTag(o)}`);
+    if (o.source === "bybit") {
+      lines.push(`  ${o.status} · entry ${o.entry_price}`);
+    } else {
+      const conf =
+        o.live_confidence != null
+          ? `${o.original_confidence ?? "?"}→${o.live_confidence}`
+          : `${o.original_confidence ?? "?"}`;
+      lines.push(`  ${o.status} · edge ${o.edge_state} · conf ${conf}`);
+    }
+    trades.push({ id: o.id, label: `🔎 #${o.id} ${o.symbol}` });
+  }
+  return { text: lines.join("\n"), trades };
+}
+
+/** Full edge/position breakdown for a single tracked trade (Details button). */
+export function formatTradeDetails(o: OutcomeRow): string {
+  const dir = o.direction.toUpperCase();
+  const lines = [`🔎 #${o.id} ${o.symbol} ${dir} · ${tradeSourceTag(o)}`, ``];
+  lines.push(`Status: ${o.status}`);
+
+  if (o.source === "bybit") {
+    lines.push(`Entry: ${o.entry_price} · Size: ${o.original_factors?.size ?? "?"}`);
+    if (o.sl) lines.push(`SL: ${o.sl}`);
+    if (o.tp) lines.push(`TP: ${o.tp}`);
+    lines.push(``, `Auto-detected Bybit position. Closes when you exit on the exchange.`);
+    return lines.join("\n");
+  }
+
+  lines.push(`Edge: ${o.edge_state}`);
+  lines.push(`Confidence: ${o.original_confidence ?? "?"} → ${o.live_confidence ?? "?"}`);
+  lines.push(`Setup quality: ${o.original_setup_quality ?? "?"} → ${o.live_setup_quality ?? "?"}`);
+  lines.push(`Entry: ${o.entry_low}–${o.entry_high} · SL: ${o.sl} · TP: ${o.tp}`);
+
+  const of = o.original_factors;
+  const lf = o.live_factors;
+  if (of || lf) {
+    lines.push(``, `Factors (original → live):`);
+    const fmt = (a?: number, b?: number) =>
+      `${a != null ? Math.round(a) : "?"} → ${b != null ? Math.round(b) : "?"}`;
+    lines.push(`  Funding %ile: ${fmt(of?.funding_percentile, lf?.funding_percentile)}`);
+    lines.push(`  OI z-score: ${of?.oi_zscore?.toFixed(1) ?? "?"} → ${lf?.oi_zscore?.toFixed(1) ?? "?"}`);
+    lines.push(`  Trend: ${of?.trend ?? "?"} → ${lf?.trend ?? "?"}`);
+  }
+  return lines.join("\n");
+}
+
 class ConsoleNotifier implements Notifier {
   readonly interactive = false;
 
-  async send(signal: Signal, chartPng?: Buffer | null): Promise<void> {
+  async send(signal: Signal, chartPng?: Buffer | null): Promise<SendResult> {
     console.log("\n" + "─".repeat(48));
     console.log(formatAlert(signal));
     if (chartPng) {
       console.log(`[chart: ${chartPng.byteLength} bytes PNG attached]`);
     }
     console.log("─".repeat(48) + "\n");
+    return { messageId: null, isPhoto: false };
   }
 
   async sendOutcome(
@@ -226,6 +380,20 @@ class ConsoleNotifier implements Notifier {
   async sendSignalUpdate(update: SignalUpdate): Promise<void> {
     console.log("\n" + "─".repeat(48));
     console.log(formatSignalUpdate(update));
+    console.log("─".repeat(48) + "\n");
+  }
+
+  async sendPositionTracked(position: BybitPosition, direction: Direction): Promise<SendResult> {
+    console.log("\n" + "─".repeat(48));
+    console.log(formatPositionTracked(position, direction));
+    console.log("─".repeat(48) + "\n");
+    return { messageId: null, isPhoto: false };
+  }
+
+  async editMessage(_messageId: number, _isPhoto: boolean, text: string): Promise<void> {
+    // No message ids on the console — just print the refreshed content.
+    console.log("\n" + "─".repeat(48));
+    console.log(text);
     console.log("─".repeat(48) + "\n");
   }
 
@@ -263,7 +431,16 @@ class TelegramNotifier implements Notifier {
       .text("⏭ Skip", `skip:${opts.signalId}`);
   }
 
-  async send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<void> {
+  /** Inline keyboard of Details buttons for the /running list (one row per trade). */
+  private async detailsKeyboard(trades: { id: number; label: string }[]) {
+    if (trades.length === 0) return undefined;
+    const { InlineKeyboard } = await import("grammy");
+    const kb = new InlineKeyboard();
+    for (const t of trades) kb.text(t.label, `details:${t.id}`).row();
+    return kb;
+  }
+
+  async send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<SendResult> {
     const caption = formatAlert(signal);
     const reply_markup = await this.followKeyboard(opts);
 
@@ -271,20 +448,21 @@ class TelegramNotifier implements Notifier {
       try {
         // grammy's InputFile accepts a Buffer directly
         const { InputFile } = await import("grammy");
-        await this.bot.api.sendPhoto(this.chatId, new InputFile(chartPng, "chart.png"), {
+        const msg = await this.bot.api.sendPhoto(this.chatId, new InputFile(chartPng, "chart.png"), {
           caption,
           reply_markup,
         });
         logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} chart to Telegram`);
-        return;
+        return { messageId: msg.message_id, isPhoto: true };
       } catch (err) {
         logger.warn(`[notify] sendPhoto failed (${(err as Error).message}), falling back to text`);
       }
     }
 
     // Fallback: text-only message
-    await this.bot.api.sendMessage(this.chatId, caption, { reply_markup });
+    const msg = await this.bot.api.sendMessage(this.chatId, caption, { reply_markup });
     logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} to Telegram (text only)`);
+    return { messageId: msg.message_id, isPhoto: false };
   }
 
   async sendOutcome(
@@ -301,6 +479,27 @@ class TelegramNotifier implements Notifier {
   async sendSignalUpdate(update: SignalUpdate): Promise<void> {
     await this.bot.api.sendMessage(this.chatId, formatSignalUpdate(update));
     logger.info(`[notify] Sent ${update.symbol} ${update.edgeState} update to Telegram`);
+  }
+
+  async sendPositionTracked(position: BybitPosition, direction: Direction): Promise<SendResult> {
+    const msg = await this.bot.api.sendMessage(this.chatId, formatPositionTracked(position, direction));
+    logger.info(`[notify] Sent position-tracked ${position.symbol} ${direction} to Telegram`);
+    return { messageId: msg.message_id, isPhoto: false };
+  }
+
+  async editMessage(messageId: number, isPhoto: boolean, text: string): Promise<void> {
+    try {
+      if (isPhoto) {
+        await this.bot.api.editMessageCaption(this.chatId, messageId, { caption: text });
+      } else {
+        await this.bot.api.editMessageText(this.chatId, messageId, text);
+      }
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      // An unchanged refresh ("message is not modified") is expected and harmless.
+      if (msg.includes("message is not modified")) return;
+      logger.warn(`[notify] editMessage #${messageId} failed: ${msg}`);
+    }
   }
 
   async sendDigest(text: string): Promise<void> {
@@ -349,6 +548,18 @@ class TelegramNotifier implements Notifier {
       }
     });
 
+    // /running — interactive list of everything tracked, with per-trade Details buttons.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.command("running", async (ctx: any) => {
+      if (!authorized(ctx)) return;
+      try {
+        const view = await handlers.running();
+        await ctx.reply(view.text, { reply_markup: await this.detailsKeyboard(view.trades) });
+      } catch (err) {
+        await ctx.reply(`⚠ running failed: ${(err as Error).message}`);
+      }
+    });
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.command("scan", async (ctx: any) => {
       if (!authorized(ctx)) return;
@@ -387,6 +598,23 @@ class TelegramNotifier implements Notifier {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.callbackQuery(/^skip:(\d+)$/, (ctx: any) => handleAction(ctx, handlers.onSkip));
 
+    // Details button on the /running list — replies with the full breakdown. Unlike
+    // Follow/Skip it is repeatable, so the keyboard is left intact.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.callbackQuery(/^details:(\d+)$/, async (ctx: any) => {
+      if (!authorized(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      try {
+        const reply = await handlers.onDetails(Number(ctx.match?.[1]));
+        await ctx.answerCallbackQuery();
+        await ctx.reply(reply);
+      } catch (err) {
+        await ctx.answerCallbackQuery({ text: `error: ${(err as Error).message}` });
+      }
+    });
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.catch((err: any) => logger.warn(`[notify] bot error: ${err?.message ?? err}`));
 
@@ -395,6 +623,7 @@ class TelegramNotifier implements Notifier {
       .setMyCommands([
         { command: "analytics", description: "performance report (optional: days, e.g. /analytics 7)" },
         { command: "status", description: "current open signals" },
+        { command: "running", description: "interactive list of tracked trades" },
         { command: "scan", description: "force a scan, e.g. /scan ZECUSDT" },
       ])
       .catch(() => {});

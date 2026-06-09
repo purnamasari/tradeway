@@ -4,7 +4,7 @@
 import { loadWatchlist, loadRules, loadEnv, type AssetConfig } from "./config.js";
 import { createCache } from "./cache.js";
 import { createDb } from "./db/index.js";
-import { createNotifier, formatStatus } from "./notify.js";
+import { createNotifier, formatStatus, formatRunning, formatTradeDetails } from "./notify.js";
 import { scanSymbol, type ScannerDeps, type ContextProvider } from "./scanner.js";
 import { buildMarketContext } from "./data/market.js";
 import { buildMockContext } from "./data/mock.js";
@@ -15,7 +15,10 @@ import {
   setSignalDecision,
   createOutcome,
   fetchOpenOutcomeForSymbol,
+  fetchOutcomeById,
+  fetchSignalAlertRef,
 } from "./db/accumulate.js";
+import { reconcilePositions } from "./positions/reconciler.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
@@ -305,6 +308,19 @@ async function main() {
           notifier,
         }),
     });
+    // Bybit position reconciler (60s) — autodetect & track real open positions when
+    // read-only API keys are configured. READ-ONLY: observes positions, never trades.
+    if (env.bybitApiKey && env.bybitApiSecret) {
+      const creds = { apiKey: env.bybitApiKey, apiSecret: env.bybitApiSecret };
+      logger.info("[boot] bybit position autodetect: enabled (read-only)");
+      tasks.push({
+        name: "positions",
+        everyMs: 60_000,
+        runAtBoot: true,
+        run: () =>
+          reconcilePositions({ db: database, creds, category, fetchPrice: priceFetcher, notifier }),
+      });
+    }
     tasks.push({
       name: "retention",
       everyMs: 24 * 60 * 60 * 1000,
@@ -330,6 +346,13 @@ async function main() {
         return formatDigest(report);
       },
       status: async () => formatStatus(await fetchOpenOutcomes(database, { followedOnly: true })),
+      // /running covers everything tracked: followed signals AND autodetected Bybit
+      // positions (both are followed=true), so one fetch returns the full list.
+      running: async () => formatRunning(await fetchOpenOutcomes(database, { followedOnly: true })),
+      onDetails: async (outcomeId) => {
+        const row = await fetchOutcomeById(database, outcomeId);
+        return row ? formatTradeDetails(row) : "Trade not found.";
+      },
       scan: async (symbol) => {
         const asset: AssetConfig =
           enabled.find((a) => a.symbol === symbol) ??
@@ -344,7 +367,9 @@ async function main() {
         if (await fetchOpenOutcomeForSymbol(database, signal.symbol)) {
           return `Already an active signal for ${signal.symbol}.`;
         }
-        await createOutcome(database, signal, signalId, true);
+        // Reuse the original alert message so edge updates edit it in place (no spam).
+        const ref = await fetchSignalAlertRef(database, signalId);
+        await createOutcome(database, signal, signalId, true, ref);
         return `✅ Following ${signal.symbol} ${signal.direction.toUpperCase()} ${signal.strategy}`;
       },
       onSkip: async (signalId) => {

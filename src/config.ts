@@ -195,6 +195,11 @@ export interface Env {
   redisUrl?: string;
   databaseUrl?: string;
   bybitCategory: string;
+  /** Read-only Bybit API credentials. When both are set, the position reconciler
+   *  autodetects and tracks real open positions. Used ONLY to read positions — the
+   *  bot never places, modifies, or closes orders. */
+  bybitApiKey?: string;
+  bybitApiSecret?: string;
   /** Health endpoint port. Set to 0/empty to disable the health server. */
   healthPort: number;
   /** Health endpoint bind address. Defaults to loopback (proxy/tunnel to expose). */
@@ -213,6 +218,8 @@ export function loadEnv(): Env {
     redisUrl: process.env.REDIS_URL || undefined,
     databaseUrl: process.env.DATABASE_URL || undefined,
     bybitCategory: process.env.BYBIT_CATEGORY || "linear",
+    bybitApiKey: process.env.BYBIT_API_KEY || undefined,
+    bybitApiSecret: process.env.BYBIT_API_SECRET || undefined,
     healthPort: process.env.HEALTH_PORT ? Number(process.env.HEALTH_PORT) : 3000,
     healthHost: process.env.HEALTH_HOST || "127.0.0.1",
     opsAlerts: process.env.OPS_ALERTS !== "false",

@@ -2,7 +2,7 @@
 // building percentile/z-score windows over time.
 // Also handles signal outcome persistence.
 import type { Db } from "./index.js";
-import type { Candle, MarketContext, RegimeResult, TrendResult, Signal, StrategyKind, EdgeState } from "../types.js";
+import type { Candle, MarketContext, RegimeResult, TrendResult, Signal, StrategyKind, EdgeState, Direction } from "../types.js";
 import type { Rules } from "../config.js";
 import { ENTRY_TTL } from "../types.js";
 import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes, signalEdgeUpdates } from "./schema.js";
@@ -160,17 +160,70 @@ export async function setSignalDecision(
   }
 }
 
+/** Persist the Telegram alert message ref on a signal, so its tracked outcome can
+ *  edit that message in place on edge updates (anti-spam). No-op if no message id. */
+export async function setSignalAlertRef(
+  db: Db,
+  signalId: number,
+  ref: NotifyRef,
+): Promise<void> {
+  if (!db || ref.messageId == null) return;
+  try {
+    await db
+      .update(signalsTable)
+      .set({ alert_message_id: ref.messageId, alert_is_photo: ref.isPhoto })
+      .where(eq(signalsTable.id, signalId));
+  } catch (err) {
+    logger.warn(`[db] setSignalAlertRef failed for #${signalId}: ${(err as Error).message}`);
+  }
+}
+
+/** Read back a signal's stored alert message ref (for the Follow path). */
+export async function fetchSignalAlertRef(db: Db, signalId: number): Promise<NotifyRef> {
+  if (!db) return { messageId: null, isPhoto: false };
+  try {
+    const rows = await db
+      .select({ id: signalsTable.alert_message_id, photo: signalsTable.alert_is_photo })
+      .from(signalsTable)
+      .where(eq(signalsTable.id, signalId))
+      .limit(1);
+    return { messageId: rows[0]?.id ?? null, isPhoto: rows[0]?.photo ?? false };
+  } catch (err) {
+    logger.warn(`[db] fetchSignalAlertRef failed for #${signalId}: ${(err as Error).message}`);
+    return { messageId: null, isPhoto: false };
+  }
+}
+
+/** Set the notify message ref on an outcome (the message edge/PnL updates edit). */
+export async function setOutcomeNotifyRef(
+  db: Db,
+  outcomeId: number,
+  ref: NotifyRef,
+): Promise<void> {
+  if (!db || ref.messageId == null) return;
+  try {
+    await db
+      .update(signalOutcomes)
+      .set({ notify_message_id: ref.messageId, notify_is_photo: ref.isPhoto })
+      .where(eq(signalOutcomes.id, outcomeId));
+  } catch (err) {
+    logger.warn(`[db] setOutcomeNotifyRef failed for #${outcomeId}: ${(err as Error).message}`);
+  }
+}
+
 // ── Outcome persistence ─────────────────────────────────────────────────────
 
 /**
  * Create an outcome row in PENDING_ENTRY status.
  * expires_at is set to now + entry_ttl (time allowed to reach entry zone).
+ * `notify` carries the Telegram alert message to edit in place on later updates.
  */
 export async function createOutcome(
   db: Db,
   signal: Signal,
   signalId: number,
   followed = true,
+  notify: NotifyRef = { messageId: null, isPhoto: false },
 ): Promise<void> {
   if (!db) return;
   try {
@@ -192,6 +245,8 @@ export async function createOutcome(
       tp: signal.tp,
       opened_at: now,
       expires_at: expiresAt,
+      notify_message_id: notify.messageId,
+      notify_is_photo: notify.isPhoto,
       // ── Edge lifecycle seed: immutable originals ──────────────────────────
       original_confidence: signal.confidence,
       original_setup_quality: signal.setup_quality,
@@ -230,6 +285,7 @@ export interface OutcomeRow {
   closed_at: Date | null;
   expires_at: Date;
   followed: boolean;
+  source: string; // 'signal' | 'bybit'
   // Edge lifecycle
   original_confidence: number | null;
   original_setup_quality: number | null;
@@ -244,6 +300,14 @@ export interface OutcomeRow {
   last_notified_confidence: number | null;
   last_edge_record_at: Date | null;
   last_recorded_confidence: number | null;
+  notify_message_id: number | null;
+  notify_is_photo: boolean;
+}
+
+/** A Telegram message reference to edit in place (anti-spam refresh). */
+export interface NotifyRef {
+  messageId: number | null;
+  isPhoto: boolean;
 }
 
 /** Shape of the `original_factors` / `live_factors` JSONB blobs. */
@@ -254,6 +318,7 @@ export interface EdgeFactorsSnapshot {
   structure_intact?: boolean;
   trend?: string;
   regime?: string;
+  size?: number; // position size, for source='bybit' rows (no signal factors)
 }
 
 /**
@@ -306,7 +371,7 @@ export async function activateOutcome(
 export async function closeOutcome(
   db: Db,
   outcomeId: number,
-  status: "TP_HIT" | "SL_HIT" | "EXPIRED",
+  status: "TP_HIT" | "SL_HIT" | "EXPIRED" | "CLOSED",
   hitPrice: number | null,
   closedAt: Date,
   openedAt?: Date,
@@ -351,6 +416,100 @@ export async function fetchOpenOutcomeForSymbol(
     return (rows[0] as OutcomeRow) ?? null;
   } catch (err) {
     logger.warn(`[db] fetchOpenOutcomeForSymbol failed for ${symbol}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+// ── Bybit (autodetected real position) outcomes ──────────────────────────────
+
+export interface BybitOutcomeInput {
+  symbol: string;
+  direction: Direction;
+  entryPrice: number;
+  size: number; // contracts/qty held — informational, shown in /running
+  sl: number | null; // Bybit's set SL, if any (0 when unset)
+  tp: number | null; // Bybit's set TP, if any (0 when unset)
+}
+
+// Real positions have no signal-defined entry window or TTL — they exit when the user
+// closes them (reconciler detects the disappearance). expires_at must be non-null, so
+// set it far out; the price tracker skips source='bybit' rows anyway.
+const BYBIT_OUTCOME_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Create an ACTIVE, source='bybit' outcome for an autodetected real position. signal_id
+ * is a 0 sentinel (there is no originating signal; no FK exists), strategy is 'manual'.
+ * These are tracked for PnL and shown in /running but NOT edge-monitored — edge health
+ * validates a *signal's* thesis, which a manual trade does not have. Returns the new id.
+ */
+export async function createBybitOutcome(
+  db: Db,
+  input: BybitOutcomeInput,
+): Promise<number | null> {
+  if (!db) return null;
+  try {
+    const now = new Date();
+    const rows = await db
+      .insert(signalOutcomes)
+      .values({
+        signal_id: 0,
+        symbol: input.symbol,
+        strategy: "manual",
+        direction: input.direction,
+        source: "bybit",
+        followed: true,
+        status: "ACTIVE",
+        entry_price: input.entryPrice,
+        entry_low: input.entryPrice,
+        entry_high: input.entryPrice,
+        sl: input.sl ?? 0,
+        tp: input.tp ?? 0,
+        opened_at: now,
+        activated_at: now,
+        expires_at: new Date(now.getTime() + BYBIT_OUTCOME_TTL_MS),
+        // Stash size in original_factors so /running can show it without a new column.
+        original_factors: { size: input.size } as EdgeFactorsSnapshot,
+      })
+      .returning({ id: signalOutcomes.id });
+    const id = rows[0]?.id ?? null;
+    logger.info(
+      `[position] Tracking real ${input.symbol} ${input.direction} @ ${input.entryPrice} (outcome #${id})`,
+    );
+    return id;
+  } catch (err) {
+    logger.warn(`[db] createBybitOutcome failed for ${input.symbol}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/** Open (PENDING_ENTRY|ACTIVE) outcomes that came from a real Bybit position. */
+export async function fetchOpenBybitOutcomes(db: Db): Promise<OutcomeRow[]> {
+  if (!db) return [];
+  try {
+    const rows = await db
+      .select()
+      .from(signalOutcomes)
+      .where(
+        and(
+          eq(signalOutcomes.source, "bybit"),
+          inArray(signalOutcomes.status, ["PENDING_ENTRY", "ACTIVE"]),
+        ),
+      );
+    return rows as OutcomeRow[];
+  } catch (err) {
+    logger.warn(`[db] fetchOpenBybitOutcomes failed: ${(err as Error).message}`);
+    return [];
+  }
+}
+
+/** Fetch a single outcome row by id (for the /running Details button). */
+export async function fetchOutcomeById(db: Db, id: number): Promise<OutcomeRow | null> {
+  if (!db) return null;
+  try {
+    const rows = await db.select().from(signalOutcomes).where(eq(signalOutcomes.id, id)).limit(1);
+    return (rows[0] as OutcomeRow) ?? null;
+  } catch (err) {
+    logger.warn(`[db] fetchOutcomeById failed for #${id}: ${(err as Error).message}`);
     return null;
   }
 }

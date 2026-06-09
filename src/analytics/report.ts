@@ -12,11 +12,13 @@ import {
   confidenceDecay,
   factorEffectiveness,
   durations,
+  manualTrades,
   type GroupRow,
   type CountsSummary,
   type ConfidenceDecay,
   type FactorEffectiveness,
   type Durations,
+  type ManualTradesSummary,
 } from "./queries.js";
 
 export interface RateRow {
@@ -41,6 +43,7 @@ export interface AnalyticsReport {
   confidenceDecay: ConfidenceDecay;
   factorEffectiveness: FactorEffectiveness;
   durations: Durations;
+  manualTrades: ManualTradesSummary;
 }
 
 function winRate(wins: number, losses: number): number | null {
@@ -71,7 +74,7 @@ function sortRows(rows: RateRow[], asBuckets = false): RateRow[] {
 }
 
 export async function buildAnalyticsReport(db: NonNullable<Db>, days: number): Promise<AnalyticsReport> {
-  const [s, strat, dir, sym, reg, conf, edge, decay, factors, dur] = await Promise.all([
+  const [s, strat, dir, sym, reg, conf, edge, decay, factors, dur, manual] = await Promise.all([
     summary(db, days),
     byStrategy(db, days),
     byDirection(db, days),
@@ -82,6 +85,7 @@ export async function buildAnalyticsReport(db: NonNullable<Db>, days: number): P
     confidenceDecay(db, days),
     factorEffectiveness(db, days),
     durations(db, days),
+    manualTrades(db, days),
   ]);
 
   return {
@@ -97,7 +101,15 @@ export async function buildAnalyticsReport(db: NonNullable<Db>, days: number): P
     confidenceDecay: decay,
     factorEffectiveness: factors,
     durations: dur,
+    manualTrades: manual,
   };
+}
+
+/** One-line manual-trades summary, or null when there are none to report. */
+function manualLine(m: ManualTradesSummary): string | null {
+  if (m.open === 0 && m.closed === 0) return null;
+  const avg = m.avgPnlPct == null ? "—" : `${m.avgPnlPct >= 0 ? "+" : ""}${m.avgPnlPct.toFixed(2)}%`;
+  return `Manual trades (Bybit): ${m.open} open · ${m.closed} closed (${m.wins}W/${m.losses}L) · avg ${avg}`;
 }
 
 // ── Formatting helpers ──────────────────────────────────────────────────────
@@ -141,6 +153,8 @@ export function formatReportText(r: AnalyticsReport): string {
     `Signals: ${s.total} total · ${s.resolved} resolved · ${s.open} open · ${s.expired} expired`,
   );
   out.push(`Overall win-rate: ${pct(s.winRatePct)}  (${s.tp}W / ${s.sl}L)`);
+  const ml = manualLine(r.manualTrades);
+  if (ml) out.push(ml);
   out.push("");
   out.push(table("By strategy", r.byStrategy, "strategy"));
   out.push("");
@@ -174,6 +188,8 @@ export function formatDigest(r: AnalyticsReport): string {
   lines.push(`📊 Tradeaway digest · ${windowLabel(r.windowDays)}`);
   lines.push("");
   lines.push(`Win-rate: ${pct(s.winRatePct)} (${s.tp}W/${s.sl}L) · ${s.open} open · ${s.expired} expired`);
+  const ml = manualLine(r.manualTrades);
+  if (ml) lines.push(ml);
 
   if (r.byStrategy.length) {
     const top = r.byStrategy.filter((x) => x.resolved > 0);
