@@ -23,7 +23,9 @@ import {
   fetchOpenOutcomeForSymbol,
   setSignalAlertRef,
 } from "./db/accumulate.js";
-import { ema } from "./indicators.js";
+import { ema, percentileRank } from "./indicators.js";
+import { buildManagementPlan } from "./management/plan.js";
+import { estimatePaths } from "./management/paths.js";
 import { renderChart } from "./chart/renderer.js";
 import { logger } from "./logger.js";
 import { recordScanSuccess, recordScanError } from "./health.js";
@@ -188,6 +190,28 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
       entries,
       `gate: ✅ passed → alert ${signal.direction} ${signal.strategy}`,
     );
+
+    // ── Trade management plan + expected paths ────────────────────────────────
+    // Attached to the signal itself so the alert shows the full battle plan and
+    // the outcome row seeds the live manager with the same numbers.
+    signal.plan = buildManagementPlan(signal, rules);
+    const entryMid = (signal.entry_low + signal.entry_high) / 2;
+    signal.paths =
+      estimatePaths({
+        direction: signal.direction,
+        price,
+        entry: entryMid,
+        sl: signal.sl,
+        tp: signal.tp,
+        strength: (signal.confidence * 0.6 + signal.setup_quality * 0.4) / 100,
+        strategy: signal.strategy,
+        volumePercentile: percentileRank(
+          ctx.candles15m.at(-1)?.volume ?? 0,
+          (ctx.volumeHistory && ctx.volumeHistory.length >= 50
+            ? ctx.volumeHistory
+            : ctx.candles15m.map((c) => c.volume).slice(-120)),
+        ),
+      }) ?? undefined;
 
     // ── Chart rendering (failure never blocks alert) ─────────────────────────
     let chartPng: Buffer | null = null;

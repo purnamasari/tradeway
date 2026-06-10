@@ -43,6 +43,48 @@ lifecycle:
   edge_history_min_delta: 3        # append signal_edge_updates row when live conf moves >= this
   edge_history_min_interval_min: 5 # ...or at least this often (heartbeat), to bound row growth
 
+# Active-trade management: the 1-minute manager re-scans every filled trade and
+# suggests actions (move SL, take partials, exit) until the trade closes. The bot
+# never executes — every output is a suggestion for the trader.
+management:
+  enabled: true
+  # Plan triggers (R multiples of initial risk).
+  breakeven_at_r: 1.0            # at +1R → suggest moving SL to breakeven
+  lock_at_r: 1.5                 # at +1.5R → suggest locking partial profit
+  lock_fraction: 0.30            # fraction locked at lock_at_r
+  resistance_partial_fraction: 0.25  # partial when volume weakens near TP/resistance
+  # Rejection detection (1m candles).
+  rejection_window: 10           # 1m candles inspected
+  rejection_wicks_min: 3         # rejection wicks within window => signal
+  rejection_wick_body: 1.5       # wick >= this x body counts as a rejection wick
+  volume_decline_pct: 30         # directional volume down >= this % half-over-half
+  body_weakening_pct: 40         # avg candle body shrink >= this %
+  # Momentum decay (15m candles).
+  decay_vol_contraction: 0.7     # recent/prior volume ratio below this => contraction
+  decay_atr_contraction: 0.8     # ATR now vs lookback-ago below this => contraction
+  decay_adx_drop: 5              # ADX points lost vs lookback => decline
+  decay_lookback: 10             # 15m bars for ATR/ADX comparisons
+  # Adaptive stop suggestions (method chosen by regime: trending=swing,
+  # high_volatility=ATR, ranging=structure, low_volatility=EMA).
+  trail_atr_mult: 2.0
+  trail_ema_period: 21
+  stop_buffer_pct: 0.15          # buffer beyond structure/swing levels (% of price)
+  min_stop_improve_r: 0.1        # suggest only if >= this much initial risk is removed
+  # Trade health weights (sum 100).
+  health_weights:
+    structure: 25
+    momentum: 25
+    volume: 15
+    trend_alignment: 15
+    risk_protection: 20
+  # Alerting & persistence throttles.
+  health_alert_drop: 15          # alert when health falls >= this since last alert
+  update_min_interval_min: 10    # min minutes between routine in-place report edits
+  event_cooldown_min: 45         # per event-kind cooldown for warning alerts
+  emergency_confidence_floor: 45 # live confidence below this => emergency exit condition
+  history_min_interval_min: 10   # health history heartbeat cadence
+  history_min_health_delta: 5    # ...or when health moved >= this
+
 # Outcome & edge analytics surfaces (CLI report, Telegram digest, HTTP endpoint).
 analytics:
   default_window_days: 30    # CLI/HTTP default lookback (0 = all-time)
@@ -53,6 +95,7 @@ retention:
   metric_history_days: 180
   regime_log_days: 90
   edge_updates_days: 90
+  management_events_days: 90
 
 squeeze:
   enabled: false           # disabled pending evidence — was a consistent loser (counter-trend fade)

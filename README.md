@@ -42,6 +42,7 @@ Two components answer **different** questions and never override each other:
 | **S/R Engine** | "Where are key horizontal support/resistance levels?" | Swing pivots, clustered, strength scored. |
 | **Outcome Evaluator** | "Did active signals hit entry, TP, SL, or expire?" | 1-minute polling of ticker price against active outcomes in DB. |
 | **Edge Monitor** | "Does an active signal's original edge still hold?" | 1-minute recompute of confidence/structure/trend; tracks `ACTIVE → EDGE_WEAKENING → INVALIDATED`. |
+| **Trade Manager** | "What should the trader DO with this open trade right now?" | 1-minute assessment of every filled trade: trade health, rejection/decay/liquidity detection, adaptive stop suggestions, action-oriented alerts. |
 
 A signal needs both to agree (e.g. `regime=ranging` **AND** `trend=bullish` →
 `liquidity_sweep LONG` permitted).
@@ -113,6 +114,65 @@ A signal is **stateful** after publication. Each `signal_outcomes` row tracks tw
   can be analyzed later. Thresholds live under `lifecycle:` in `config/rules.yaml`.
 
 Verify the edge state machine + message formatting offline (no DB) with `pnpm test:lifecycle`.
+
+### Trade management (entries → complete trade management)
+
+Once a trade **fills** (`status=ACTIVE`), the **trade manager** (`src/management/`)
+re-scans the market every minute and manages it until exit — the goal is expectancy,
+not just entries: protect profits, cut losses early, catch weakening momentum, adapt
+to changing structure. The bot **only suggests; it never touches the exchange**.
+
+The user-facing lifecycle maps onto the existing state machine (orthogonal
+`management_state` column — `NONE → MONITORING → MANAGED`):
+
+```
+PENDING  = status PENDING_ENTRY        (plan delivered with the alert)
+FILLED   = status ACTIVE               (manager picks it up within a minute)
+ACTIVE   = ACTIVE + MONITORING         (scanned every 60s)
+MANAGED  = ACTIVE + MANAGED            (≥1 action suggested)
+EXITED   = TP_HIT | SL_HIT | EXPIRED | CLOSED
+```
+
+What ships with each **signal alert** (also persisted on the outcome row):
+
+- **Management plan** — Base (entry/SL/TP), Protection (`+1R → breakeven`,
+  `+1.5R → lock 30%`, volume-weakness partials), Aggressive (trail the runner with the
+  regime-chosen method), and Emergency rules (opposite engulf / structure break /
+  confidence floor → exit).
+- **Expected-path probabilities** — `A: TP directly / B: retest then TP / C: SL hit`,
+  integers summing to 100, recomputed live as the trade evolves.
+
+What the manager computes **every minute** per filled trade (signal-sourced *and*
+autodetected Bybit positions):
+
+- **Trade health (0–100)** — weighted blend of structure / momentum / volume /
+  trend-alignment / risk-protection (`management.health_weights`), classified
+  `excellent (85+) / healthy (70+) / neutral (55+) / weak (40+) / exit candidate (<40)`.
+- **Rejection detection** — repeated adverse wicks, failed breakouts, fading
+  directional volume, weakening bodies, RSI divergence (≥2 signals → alert).
+- **Momentum decay** — volume/ATR contraction, ADX decline, RSI divergence, MACD
+  histogram weakening (≥2 → alert).
+- **Liquidity events** — sweeps, stop hunts, and breakout traps around recent extremes
+  on volume spikes, classified with/against the trade.
+- **Adaptive stop suggestions** — regime-chosen method (`trending`=swing,
+  `high_volatility`=ATR, `ranging`=structure, `low_volatility`=EMA), only when it
+  meaningfully improves protection (`min_stop_improve_r`); never widens a stop.
+- **Dynamic confidence** — the edge monitor's `live_confidence` rendered as
+  `entry → current` in every report (the manager owns messaging for filled trades so
+  one living Telegram message carries health + edge + actions).
+
+**Alerts are action-oriented** — every event answers *what happened / why it matters /
+what to do* — and conservatively throttled: a persisting condition alerts **once**
+(latched until it clears), warning kinds respect `management.event_cooldown_min`, and
+routine numbers refresh by editing the tracked message in place. Bybit position rows
+keep their reconciler-owned live message (now enriched with health + suggested stop);
+the manager sends event alerts for them and mirrors SL/TP edits made on the exchange.
+Event history is appended to `trade_management_events` (write-gated heartbeats) for
+later analysis. All knobs live under `management:` in `config/rules.yaml`; disable the
+whole layer with `management.enabled: false`.
+
+Verify detectors, stops, health, paths, plan, and the end-to-end assessment offline
+(no DB, no network) with `pnpm test:management`.
 
 ### Outcome & edge analytics
 
@@ -212,7 +272,8 @@ Postgres) so tests are fully isolated and deterministic.
   cooldown).
 - `config/rules.yaml` — regime thresholds, trend tiers, scoring weights, ATR stop
   sizing (`risk:`), momentum detector (`momentum:`), squeeze toggle (`squeeze.enabled`),
-  signal lifecycle thresholds (`lifecycle:`), analytics/digest cadence (`analytics:`), retention policy.
+  signal lifecycle thresholds (`lifecycle:`), trade management (`management:`),
+  analytics/digest cadence (`analytics:`), retention policy.
 - `.env` (optional, copy from `.env.example`) — enables enhancement layers:
   - `GEMINI_API_KEY` → AI trend classifier (else EMA/ADX fallback)
   - `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` → Telegram alerts (else console)
@@ -275,9 +336,10 @@ log (`scheduler=bullmq|interval`).
    ```
 
    Tables created: `metric_history`, `signals`, `regime_log`, `signal_outcomes`,
-   `signal_edge_updates`. All lifecycle/analytics/interactive columns (incl.
-   `signals.decision`, `signal_outcomes.followed`) are additive, so `pnpm db:push`
-   applies them to an existing database without data loss.
+   `signal_edge_updates`, `trade_management_events`. All lifecycle/analytics/
+   interactive/management columns (incl. `signals.decision`, `signal_outcomes.followed`,
+   `signal_outcomes.management_state`) are additive, so `pnpm db:push` applies them to
+   an existing database without data loss.
 
 ## Deployment (VPS + PM2 + CI/CD)
 
@@ -403,14 +465,22 @@ src/
     market.ts               assembles per-symbol MarketContext
     mock.ts                 deterministic offline data (sweep + pullback scenarios)
   db/
-    schema.ts               Drizzle schema: metric_history, signals, regime_log, signal_outcomes, signal_edge_updates
+    schema.ts               Drizzle schema: metric_history, signals, regime_log, signal_outcomes, signal_edge_updates, trade_management_events
     index.ts                Postgres client (graceful degradation)
-    accumulate.ts           recordMetrics, recordSignal, recordRegime, outcomes & retention
+    accumulate.ts           recordMetrics, recordSignal, recordRegime, outcomes, management & retention
   outcome/
     outcome-tracker.ts      price lifecycle: evaluates open outcomes against live tickers every minute
   lifecycle/
     edge.ts                 edge recompute (computeEdgeSnapshot) + conservative classifyEdgeState
     monitor.ts              edge lifecycle monitor: live scores, edge state, throttled Telegram updates
+  management/
+    detectors.ts            rejection / momentum-decay / liquidity-event detection (pure math)
+    health.ts               trade health score (structure/momentum/volume/trend/risk components)
+    stops.ts                regime-aware adaptive stop suggestions (swing/ATR/EMA/structure)
+    paths.ts                expected-path probabilities (TP direct / retest / SL)
+    plan.ts                 management-plan generator (Base/Protection/Aggressive/Emergency)
+    assess.ts               per-minute trade assessment (combines all of the above)
+    manager.ts              the 60s manager loop: throttled alerts, history, persistence
   analytics/
     queries.ts              read-only win-rate / calibration / edge-validation / factor aggregations
     report.ts               assembles AnalyticsReport + text (CLI) and digest (Telegram) formatters
@@ -443,6 +513,7 @@ Deferred to later sprints:
 - **Prev Day/Week H/L S/R source** (high-weight S/R levels from REST).
 
 Recently landed (post-MVP):
+- **Trade management layer** — the 1-minute manager turns the bot from entry-only into complete trade management: trade health, rejection/decay/liquidity detection, adaptive stops, management plans, and expected-path probabilities (see [Trade management](#trade-management-entries--complete-trade-management)).
 - **Expected-path chart overlay** — per-strategy `chart/path-calculator.ts` adds entry/sweep/reclaim markers, a shaded watch zone, and a dotted projection from entry to TP, computed on the rendered candle series.
 - **Bybit WebSocket feed** — streamed candles/ticker with REST seeding + reconnect (`MARKET_FEED=ws`).
 - **BullMQ scheduler** — durable repeatable jobs when `REDIS_URL` is set, `setInterval` fallback otherwise.

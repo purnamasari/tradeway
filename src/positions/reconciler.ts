@@ -19,6 +19,7 @@ import {
   fetchOpenBybitOutcomes,
   closeOutcome,
   setOutcomeNotifyRef,
+  updateOutcomeLevels,
 } from "../db/accumulate.js";
 import { formatPositionLive, formatOutcome } from "../notify.js";
 import { logger } from "../logger.js";
@@ -76,7 +77,18 @@ export async function reconcilePositions(deps: PositionReconcilerDeps): Promise<
   // ── Still-open positions → refresh the SAME message with live PnL ────────────
   for (const o of tracked) {
     const p = liveByKey.get(key(o.symbol, o.direction));
-    if (!p || o.notify_message_id == null) continue;
+    if (!p) continue;
+    // Mirror SL/TP edits made on the exchange so the trade manager scores risk
+    // protection against the user's REAL stop, not the one seen at detection.
+    const liveSl = p.stopLoss ?? 0;
+    const liveTp = p.takeProfit ?? 0;
+    if (liveSl !== o.sl || liveTp !== o.tp) {
+      await updateOutcomeLevels(db, o.id, { sl: liveSl, tp: liveTp });
+      o.sl = liveSl;
+      o.tp = liveTp;
+      logger.info(`[position] ${o.symbol} levels updated from exchange: SL ${liveSl || "—"} TP ${liveTp || "—"}`);
+    }
+    if (o.notify_message_id == null) continue;
     try {
       await notifier.editMessage(o.notify_message_id, o.notify_is_photo, formatPositionLive(o, p.markPrice, p.unrealisedPnl));
     } catch (err) {

@@ -1,6 +1,16 @@
 // Alert delivery. Sends to Telegram when configured, otherwise prints to console.
 // Supports optional chart image attachment (PNG buffer) and outcome notifications.
-import type { Signal, OutcomeStatus, SignalUpdate, Direction } from "./types.js";
+import type {
+  Signal,
+  OutcomeStatus,
+  SignalUpdate,
+  Direction,
+  ManagementPlan,
+  ManagementEvent,
+  PathProbabilities,
+  TradeAssessment,
+} from "./types.js";
+import { healthBand } from "./types.js";
 import type { OutcomeRow } from "./db/accumulate.js";
 import type { BybitPosition } from "./data/bybit-private.js";
 import type { Env } from "./config.js";
@@ -10,12 +20,18 @@ export function formatExplainability(signal: Signal): string {
   const b = signal.score_breakdown;
   const lines: string[] = [];
 
-  if (b.funding_percentile <= 10) lines.push(`✓ Funding bottom ${b.funding_percentile}% of 90d`);
-  else if (b.funding_percentile >= 90) lines.push(`✓ Funding top ${(100 - b.funding_percentile)}% of 90d`);
-  if (Math.abs(b.oi_zscore) >= 2.0) lines.push(`✓ OI z-score ${b.oi_zscore > 0 ? "+" : ""}${b.oi_zscore.toFixed(1)}`);
-  if (b.volume_percentile >= 80) lines.push(`✓ Volume top ${Math.round(100 - b.volume_percentile)}% of recent`);
+  // Percentile extremes read as "top/bottom N%" — clamp to 1 so the 100th
+  // percentile never renders as the nonsensical "top 0%".
+  const topPct = (p: number) => Math.max(1, Math.round(100 - p));
+  const bottomPct = (p: number) => Math.max(1, Math.round(p));
 
-  lines.push(`✓ S/R strength ${b.sr_level_strength}`);
+  if (b.funding_percentile <= 10) lines.push(`✓ Funding bottom ${bottomPct(b.funding_percentile)}% of 90d`);
+  else if (b.funding_percentile >= 90) lines.push(`✓ Funding top ${topPct(b.funding_percentile)}% of 90d`);
+  if (Math.abs(b.oi_zscore) >= 2.0) lines.push(`✓ OI z-score ${b.oi_zscore > 0 ? "+" : ""}${b.oi_zscore.toFixed(1)}`);
+  if (b.volume_percentile >= 80) lines.push(`✓ Volume top ${topPct(b.volume_percentile)}% of recent`);
+
+  // A zero-strength level is the absence of evidence — never a ✓ line.
+  if (b.sr_level_strength > 0) lines.push(`✓ S/R strength ${b.sr_level_strength}`);
   if (b.engulf_body_ratio >= 1.0) lines.push(`✓ Engulf ratio ${b.engulf_body_ratio.toFixed(2)}×`);
   if (b.htf_aligned) lines.push(`✓ HTF 1H aligned`);
   if (b.sweep_wick_ratio) lines.push(`✓ Sweep wick ${b.sweep_wick_ratio.toFixed(2)}× body`);
@@ -27,7 +43,7 @@ export function formatExplainability(signal: Signal): string {
 export function formatAlert(signal: Signal): string {
   const dir = signal.direction.toUpperCase();
   const emoji = signal.direction === "long" ? "🟢" : "🔴";
-  return [
+  const lines = [
     `🚨 ${signal.symbol} ${dir} · ${signal.strategy} ${emoji}`,
     ``,
     `Confidence:    ${signal.confidence} / 100`,
@@ -38,7 +54,133 @@ export function formatAlert(signal: Signal): string {
     ``,
     `Why?`,
     formatExplainability(signal),
+  ];
+  if (signal.paths) lines.push(``, formatPaths(signal.paths));
+  if (signal.plan) lines.push(``, formatPlan(signal.plan));
+  return lines.join("\n");
+}
+
+// ── Trade management formatting ───────────────────────────────────────────────
+
+export function formatPaths(p: PathProbabilities): string {
+  return [
+    `Expected path:`,
+    `A. TP directly — ${p.tp_direct}%`,
+    `B. Retest, then TP — ${p.retest_then_tp}%`,
+    `C. SL hit — ${p.sl_hit}%`,
   ].join("\n");
+}
+
+export function formatPlan(plan: ManagementPlan): string {
+  const lines = [`Management plan:`];
+  for (const r of plan.protection) lines.push(`• If ${r.trigger} → ${r.action}`);
+  for (const r of plan.aggressive) lines.push(`• If ${r.trigger} → ${r.action}`);
+  lines.push(`Emergency exit if:`);
+  for (const r of plan.emergency) lines.push(`• ${r.trigger} → ${r.action}`);
+  return lines.join("\n");
+}
+
+const HEALTH_LABEL: Record<string, string> = {
+  excellent: "Excellent",
+  healthy: "Healthy",
+  neutral: "Neutral",
+  weak: "Weak",
+  exit_candidate: "Exit candidate",
+};
+
+const SEVERITY_EMOJI: Record<string, string> = { info: "ℹ", warning: "⚠", critical: "🚨" };
+
+/**
+ * Action-oriented management alert: every event answers what happened, why it
+ * matters, and what the trader should do — never a bare observation.
+ */
+export function formatManagementEvent(
+  symbol: string,
+  direction: Direction,
+  event: ManagementEvent,
+  a: TradeAssessment,
+): string {
+  const lines = [
+    `${SEVERITY_EMOJI[event.severity] ?? "⚠"} ${symbol} ${direction.toUpperCase()} — ${event.title}`,
+    ``,
+    `What happened:`,
+    ...event.happened.map((h) => `• ${h}`),
+    ``,
+    `Why it matters:`,
+    event.matters,
+  ];
+  if (event.actions.length > 0) {
+    lines.push(``, `Suggested action:`);
+    event.actions.forEach((act, idx) => lines.push(`${idx + 1}. ${act}`));
+  }
+  const conf =
+    a.currentConfidence != null && a.entryConfidence != null
+      ? ` · Confidence ${a.entryConfidence}→${a.currentConfidence}`
+      : "";
+  lines.push(
+    ``,
+    `Trade health: ${a.health.total}/100 (${HEALTH_LABEL[a.health.band]})${conf} · PnL ${signed(a.pnlPct)}%`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Living trade report — the full picture of a managed trade, edited into the
+ * tracked message in place (quiet updates: one message per trade, refreshed).
+ */
+export function formatTradeReport(o: OutcomeRow, a: TradeAssessment): string {
+  const dir = a.direction.toUpperCase();
+  const emoji = a.health.total >= 70 ? "🟢" : a.health.total >= 40 ? "🟡" : "🔴";
+  const managed = o.management_state === "MANAGED" ? " (managed)" : "";
+  const lines = [
+    `${emoji} ${a.symbol} ${dir} · ${o.source === "bybit" ? "Bybit" : o.strategy} — ${o.status}${managed}`,
+    ``,
+    `Trade Health: ${a.health.total}/100 (${HEALTH_LABEL[a.health.band]})`,
+  ];
+  const h = a.health.components;
+  lines.push(
+    `  Structure ${h.structure} · Momentum ${h.momentum} · Volume ${h.volume} · Trend ${h.trend_alignment} · Risk ${h.risk_protection}`,
+  );
+  if (a.currentConfidence != null && a.entryConfidence != null) {
+    lines.push(`Confidence: ${a.entryConfidence} → ${a.currentConfidence}`);
+  }
+  lines.push(
+    `Price: ${a.price} · PnL: ${signed(a.pnlPct)}%${a.pnlR != null ? ` (${signed(a.pnlR)}R)` : ""}`,
+  );
+  lines.push(`Entry: ${o.entry_price} · SL: ${o.sl || "—"} · TP: ${o.tp || "—"}`);
+
+  if (a.observations.length > 0) {
+    lines.push(``);
+    for (const ob of a.observations) lines.push(`✓ ${ob}`);
+  }
+  if (a.warnings.length > 0) {
+    if (a.observations.length === 0) lines.push(``);
+    for (const w of a.warnings) lines.push(`⚠ ${w}`);
+  }
+
+  if (a.actions.length > 0) {
+    lines.push(``, `Suggested actions:`);
+    a.actions.forEach((act, idx) => lines.push(`${idx + 1}. ${act}`));
+  }
+
+  if (a.paths) {
+    lines.push(
+      ``,
+      `Path → TP direct ${a.paths.tp_direct}% · retest first ${a.paths.retest_then_tp}% · SL ${a.paths.sl_hit}%`,
+    );
+  }
+
+  if (a.emergency.length > 0) {
+    lines.push(``, `Exit immediately if:`);
+    for (const e of a.emergency) lines.push(`• ${e}`);
+  }
+
+  lines.push(``, `Updated ${hhmm(new Date())}`);
+  return lines.join("\n");
+}
+
+function signed(n: number): string {
+  return `${n >= 0 ? "+" : ""}${n}`;
 }
 
 // ── Signal update formatting (edge lifecycle) ───────────────────────────────
@@ -159,6 +301,37 @@ export function formatOutcome(
   ].filter(Boolean).join("\n");
 }
 
+// ── Telegram message-size limits ─────────────────────────────────────────────
+// Photo captions cap at 1024 chars; text messages at 4096. The enriched signal
+// alert (core + expected paths + management plan) can exceed the caption limit,
+// which would make sendPhoto fail and silently degrade to a text-only alert —
+// losing the chart. Instead we split at the plan boundary and deliver the plan
+// as a reply to the chart message.
+export const TG_CAPTION_LIMIT = 1024;
+export const TG_TEXT_LIMIT = 4096;
+
+const PLAN_MARKER = "\nManagement plan:";
+
+/**
+ * Split an alert into [caption, overflow] when it exceeds the photo-caption
+ * limit. Prefers a clean cut at the management-plan boundary; falls back to a
+ * hard ellipsis truncation when no marker fits.
+ */
+export function splitCaption(text: string): [string, string | null] {
+  if (text.length <= TG_CAPTION_LIMIT) return [text, null];
+  const idx = text.indexOf(PLAN_MARKER);
+  if (idx > 0 && idx <= TG_CAPTION_LIMIT) {
+    return [text.slice(0, idx).trimEnd(), text.slice(idx + 1)];
+  }
+  return [text.slice(0, TG_CAPTION_LIMIT - 1) + "…", null];
+}
+
+/** Clamp a message to the channel's hard limit (caption vs text edit). */
+export function clampMessage(text: string, isPhoto: boolean): string {
+  const limit = isPhoto ? TG_CAPTION_LIMIT : TG_TEXT_LIMIT;
+  return text.length <= limit ? text : text.slice(0, limit - 1) + "…";
+}
+
 // ── Notifier interface ──────────────────────────────────────────────────────
 
 /** Options for an outgoing signal alert. */
@@ -188,6 +361,10 @@ export interface Notifier {
   ): Promise<void>;
   /** Edge-lifecycle update for an already-active signal (not a new signal). */
   sendSignalUpdate(update: SignalUpdate): Promise<void>;
+  /** Action-oriented trade-management alert (pre-formatted event message).
+   *  `outcomeId` attaches a 🔎 Details button (interactive channels) that pulls
+   *  the full trade report via the existing /running Details handler. */
+  sendManagement(text: string, opts?: { outcomeId?: number }): Promise<void>;
   /** Notify that a real Bybit position was autodetected and is now tracked. */
   sendPositionTracked(position: BybitPosition, direction: Direction): Promise<SendResult>;
   /**
@@ -234,6 +411,14 @@ export interface CommandHandlers {
 
 // ── Open-signals status formatting (for /status) ────────────────────────────
 
+/** Compact health/PnL suffix for list views (from persisted manager fields). */
+function healthSuffix(o: OutcomeRow): string {
+  if (o.trade_health == null) return "";
+  const pnl = o.management_snapshot?.pnl_pct;
+  const pnlStr = pnl != null ? ` · ${pnl >= 0 ? "+" : ""}${pnl}%` : "";
+  return ` · ❤ ${o.trade_health}${pnlStr}`;
+}
+
 export function formatStatus(rows: OutcomeRow[]): string {
   if (rows.length === 0) return "📡 No open signals.";
   const lines = [`📡 Open signals (${rows.length}):`, ""];
@@ -243,7 +428,7 @@ export function formatStatus(rows: OutcomeRow[]): string {
         ? `${o.original_confidence ?? "?"}→${o.live_confidence}`
         : `${o.original_confidence ?? "?"}`;
     lines.push(`${o.symbol} ${o.direction.toUpperCase()} · ${o.strategy}`);
-    lines.push(`  ${o.status} · edge ${o.edge_state} · conf ${conf}`);
+    lines.push(`  ${o.status} · edge ${o.edge_state} · conf ${conf}${healthSuffix(o)}`);
   }
   return lines.join("\n");
 }
@@ -283,6 +468,13 @@ export function formatPositionLive(
   if (unrealisedPnl != null) lines.push(`uPnL: ${unrealisedPnl}`);
   if (o.sl) lines.push(`SL: ${o.sl}`);
   if (o.tp) lines.push(`TP: ${o.tp}`);
+  // Latest manager read, when the trade manager has scanned this position.
+  if (o.trade_health != null) {
+    lines.push(`Trade health: ${o.trade_health}/100 (${HEALTH_LABEL[healthBand(o.trade_health)]})`);
+  }
+  if (o.suggested_stop != null) {
+    lines.push(`Suggested stop: ${o.suggested_stop} (${o.suggested_stop_method ?? "adaptive"})`);
+  }
   lines.push(``, `Updated ${hhmm(new Date())} · closes when you exit on Bybit`);
   return lines.join("\n");
 }
@@ -308,13 +500,13 @@ export function formatRunning(rows: OutcomeRow[]): RunningView {
     const dir = o.direction.toUpperCase();
     lines.push(`#${o.id} ${o.symbol} ${dir} · ${tradeSourceTag(o)}`);
     if (o.source === "bybit") {
-      lines.push(`  ${o.status} · entry ${o.entry_price}`);
+      lines.push(`  ${o.status} · entry ${o.entry_price}${healthSuffix(o)}`);
     } else {
       const conf =
         o.live_confidence != null
           ? `${o.original_confidence ?? "?"}→${o.live_confidence}`
           : `${o.original_confidence ?? "?"}`;
-      lines.push(`  ${o.status} · edge ${o.edge_state} · conf ${conf}`);
+      lines.push(`  ${o.status} · edge ${o.edge_state} · conf ${conf}${healthSuffix(o)}`);
     }
     trades.push({ id: o.id, label: `🔎 #${o.id} ${o.symbol}` });
   }
@@ -325,12 +517,13 @@ export function formatRunning(rows: OutcomeRow[]): RunningView {
 export function formatTradeDetails(o: OutcomeRow): string {
   const dir = o.direction.toUpperCase();
   const lines = [`🔎 #${o.id} ${o.symbol} ${dir} · ${tradeSourceTag(o)}`, ``];
-  lines.push(`Status: ${o.status}`);
+  lines.push(`Status: ${o.status}${o.management_state === "MANAGED" ? " (managed)" : ""}`);
 
   if (o.source === "bybit") {
     lines.push(`Entry: ${o.entry_price} · Size: ${o.original_factors?.size ?? "?"}`);
     if (o.sl) lines.push(`SL: ${o.sl}`);
     if (o.tp) lines.push(`TP: ${o.tp}`);
+    lines.push(formatManagementSection(o));
     lines.push(``, `Auto-detected Bybit position. Closes when you exit on the exchange.`);
     return lines.join("\n");
   }
@@ -349,6 +542,42 @@ export function formatTradeDetails(o: OutcomeRow): string {
     lines.push(`  Funding %ile: ${fmt(of?.funding_percentile, lf?.funding_percentile)}`);
     lines.push(`  OI z-score: ${of?.oi_zscore?.toFixed(1) ?? "?"} → ${lf?.oi_zscore?.toFixed(1) ?? "?"}`);
     lines.push(`  Trend: ${of?.trend ?? "?"} → ${lf?.trend ?? "?"}`);
+  }
+  lines.push(formatManagementSection(o));
+  return lines.join("\n");
+}
+
+/** Persisted management state rendered from the row alone (no market recompute). */
+function formatManagementSection(o: OutcomeRow): string {
+  const lines: string[] = [];
+  if (o.trade_health != null) {
+    lines.push(``, `Trade health: ${o.trade_health}/100 (${HEALTH_LABEL[healthBand(o.trade_health)]})`);
+    const h = o.health_components;
+    if (h) {
+      lines.push(
+        `  Structure ${h.structure} · Momentum ${h.momentum} · Volume ${h.volume} · Trend ${h.trend_alignment} · Risk ${h.risk_protection}`,
+      );
+    }
+  }
+  const snap = o.management_snapshot;
+  if (snap) {
+    lines.push(`PnL: ${snap.pnl_pct >= 0 ? "+" : ""}${snap.pnl_pct}% @ ${snap.price}`);
+    for (const ob of snap.observations) lines.push(`✓ ${ob}`);
+    for (const w of snap.warnings) lines.push(`⚠ ${w}`);
+    if (snap.actions.length > 0) {
+      lines.push(`Suggested actions:`);
+      snap.actions.forEach((a, i) => lines.push(`${i + 1}. ${a}`));
+    }
+    if (snap.emergency.length > 0) {
+      lines.push(`Exit immediately if:`);
+      for (const e of snap.emergency) lines.push(`• ${e}`);
+    }
+  } else if (o.suggested_stop != null) {
+    lines.push(`Suggested stop: ${o.suggested_stop} (${o.suggested_stop_method ?? "adaptive"})`);
+  }
+  if (o.path_probs) {
+    const p = o.path_probs;
+    lines.push(`Path → TP direct ${p.tp_direct}% · retest first ${p.retest_then_tp}% · SL ${p.sl_hit}%`);
   }
   return lines.join("\n");
 }
@@ -380,6 +609,12 @@ class ConsoleNotifier implements Notifier {
   async sendSignalUpdate(update: SignalUpdate): Promise<void> {
     console.log("\n" + "─".repeat(48));
     console.log(formatSignalUpdate(update));
+    console.log("─".repeat(48) + "\n");
+  }
+
+  async sendManagement(text: string, _opts?: { outcomeId?: number }): Promise<void> {
+    console.log("\n" + "─".repeat(48));
+    console.log(text);
     console.log("─".repeat(48) + "\n");
   }
 
@@ -441,17 +676,27 @@ class TelegramNotifier implements Notifier {
   }
 
   async send(signal: Signal, chartPng?: Buffer | null, opts?: SendOptions): Promise<SendResult> {
-    const caption = formatAlert(signal);
+    const fullText = formatAlert(signal);
     const reply_markup = await this.followKeyboard(opts);
 
     if (chartPng) {
       try {
+        // Photo captions cap at 1024 chars — split the management plan off into
+        // a reply message rather than losing the chart to a caption error.
+        const [caption, overflow] = splitCaption(fullText);
         // grammy's InputFile accepts a Buffer directly
         const { InputFile } = await import("grammy");
         const msg = await this.bot.api.sendPhoto(this.chatId, new InputFile(chartPng, "chart.png"), {
           caption,
           reply_markup,
         });
+        if (overflow) {
+          await this.bot.api
+            .sendMessage(this.chatId, overflow, {
+              reply_parameters: { message_id: msg.message_id },
+            })
+            .catch((err: Error) => logger.warn(`[notify] plan follow-up failed: ${err.message}`));
+        }
         logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} chart to Telegram`);
         return { messageId: msg.message_id, isPhoto: true };
       } catch (err) {
@@ -460,7 +705,7 @@ class TelegramNotifier implements Notifier {
     }
 
     // Fallback: text-only message
-    const msg = await this.bot.api.sendMessage(this.chatId, caption, { reply_markup });
+    const msg = await this.bot.api.sendMessage(this.chatId, clampMessage(fullText, false), { reply_markup });
     logger.info(`[notify] Sent ${signal.symbol} ${signal.direction} to Telegram (text only)`);
     return { messageId: msg.message_id, isPhoto: false };
   }
@@ -481,6 +726,16 @@ class TelegramNotifier implements Notifier {
     logger.info(`[notify] Sent ${update.symbol} ${update.edgeState} update to Telegram`);
   }
 
+  async sendManagement(text: string, opts?: { outcomeId?: number }): Promise<void> {
+    let reply_markup;
+    if (opts?.outcomeId != null) {
+      const { InlineKeyboard } = await import("grammy");
+      reply_markup = new InlineKeyboard().text("🔎 Details", `details:${opts.outcomeId}`);
+    }
+    await this.bot.api.sendMessage(this.chatId, clampMessage(text, false), { reply_markup });
+    logger.info(`[notify] Sent trade-management alert to Telegram`);
+  }
+
   async sendPositionTracked(position: BybitPosition, direction: Direction): Promise<SendResult> {
     const msg = await this.bot.api.sendMessage(this.chatId, formatPositionTracked(position, direction));
     logger.info(`[notify] Sent position-tracked ${position.symbol} ${direction} to Telegram`);
@@ -489,10 +744,13 @@ class TelegramNotifier implements Notifier {
 
   async editMessage(messageId: number, isPhoto: boolean, text: string): Promise<void> {
     try {
+      // The living trade report can outgrow a photo caption (1024) — clamp so
+      // the in-place refresh never fails on length.
+      const body = clampMessage(text, isPhoto);
       if (isPhoto) {
-        await this.bot.api.editMessageCaption(this.chatId, messageId, { caption: text });
+        await this.bot.api.editMessageCaption(this.chatId, messageId, { caption: body });
       } else {
-        await this.bot.api.editMessageText(this.chatId, messageId, text);
+        await this.bot.api.editMessageText(this.chatId, messageId, body);
       }
     } catch (err) {
       const msg = (err as Error).message ?? "";

@@ -19,6 +19,7 @@
     "test:lifecycle": "tsx src/test-lifecycle.ts",
     "test:analytics": "tsx src/test-analytics.ts",
     "test:momentum": "tsx src/test-momentum.ts",
+    "test:management": "tsx src/test-management.ts",
     "test:positions": "tsx src/test-positions.ts",
     "test:backtest": "tsx src/test-backtest.ts",
     "chrome:install": "node scripts/install-chrome.mjs",

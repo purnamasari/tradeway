@@ -22,6 +22,7 @@ import { reconcilePositions } from "./positions/reconciler.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
+import { manageTrades } from "./management/manager.js";
 import { fetchTicker } from "./data/bybit.js";
 import { MarketFeed } from "./data/ws-feed.js";
 import { startScheduler, type PeriodicTask } from "./queue/scheduler.js";
@@ -306,8 +307,27 @@ async function main() {
           rules,
           env,
           notifier,
+          // The trade manager owns messaging for filled trades when enabled.
+          quietActiveMessaging: rules.management.enabled,
         }),
     });
+    // Trade manager (60s) — manages every FILLED trade until exit: trade health,
+    // rejection/decay/liquidity events, adaptive stop suggestions, and action-
+    // oriented alerts. Suggests only; never touches the exchange.
+    if (rules.management.enabled) {
+      tasks.push({
+        name: "manage",
+        everyMs: 60_000,
+        run: () =>
+          manageTrades({
+            db: database,
+            getContext: (s, c) => deps.getContext(s, c),
+            category,
+            rules,
+            notifier,
+          }),
+      });
+    }
     // Bybit position reconciler (60s) — autodetect & track real open positions when
     // read-only API keys are configured. READ-ONLY: observes positions, never trades.
     if (env.bybitApiKey && env.bybitApiSecret) {
