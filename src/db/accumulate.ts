@@ -563,6 +563,28 @@ export async function fetchOpenBybitOutcomes(db: Db): Promise<OutcomeRow[]> {
   }
 }
 
+/** Most recently closed followed trades (for the /recent evaluation view). */
+export async function fetchRecentClosedOutcomes(db: Db, limit = 10): Promise<OutcomeRow[]> {
+  if (!db) return [];
+  try {
+    const rows = await db
+      .select()
+      .from(signalOutcomes)
+      .where(
+        and(
+          eq(signalOutcomes.followed, true),
+          inArray(signalOutcomes.status, ["TP_HIT", "SL_HIT", "EXPIRED", "CLOSED"]),
+        ),
+      )
+      .orderBy(desc(signalOutcomes.closed_at))
+      .limit(Math.max(1, Math.min(limit, 50)));
+    return rows as OutcomeRow[];
+  } catch (err) {
+    logger.warn(`[db] fetchRecentClosedOutcomes failed: ${(err as Error).message}`);
+    return [];
+  }
+}
+
 /** Fetch a single outcome row by id (for the /running Details button). */
 export async function fetchOutcomeById(db: Db, id: number): Promise<OutcomeRow | null> {
   if (!db) return null;

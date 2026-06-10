@@ -8,7 +8,7 @@
 //    numbers (bigint/numeric would otherwise come back as strings).
 import type { Db } from "../db/index.js";
 import { signalOutcomes } from "../db/schema.js";
-import { and, eq, gte, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, sql, type SQL } from "drizzle-orm";
 
 /**
  * Real-trades-and-in-window predicate. Always excludes shadow outcomes
@@ -160,6 +160,51 @@ export async function durations(db: NonNullable<Db>, days: number): Promise<Dura
     .from(signalOutcomes)
     .where(resolvedInWindow(days));
   return rows[0] ?? { tpMs: null, slMs: null };
+}
+
+// ── Realized P/L evaluation (signal trades) ───────────────────────────────────
+// Profit/loss is derived from entry vs the recorded exit price (hit_price), so it
+// works retroactively over all history without a schema change. R-multiples are
+// computed against the initial risk |entry − SL|; rows without a usable SL are
+// excluded from R aggregates but still count toward percent stats.
+
+export interface PnlEvaluation {
+  trades: number; // closed, followed signal trades with an exit price
+  totalR: number | null; // sum of R-multiples (risk-normalized net result)
+  avgR: number | null; // expectancy per trade in R
+  avgWinPct: number | null;
+  avgLossPct: number | null;
+}
+
+export async function pnlEvaluation(db: NonNullable<Db>, days: number): Promise<PnlEvaluation> {
+  // Direction-aware realized PnL% and R-multiple of each closed trade.
+  const pnl = sql`case when ${signalOutcomes.direction} = 'long'
+      then (${signalOutcomes.hit_price} - ${signalOutcomes.entry_price}) / ${signalOutcomes.entry_price} * 100
+      else (${signalOutcomes.entry_price} - ${signalOutcomes.hit_price}) / ${signalOutcomes.entry_price} * 100 end`;
+  const move = sql`case when ${signalOutcomes.direction} = 'long'
+      then ${signalOutcomes.hit_price} - ${signalOutcomes.entry_price}
+      else ${signalOutcomes.entry_price} - ${signalOutcomes.hit_price} end`;
+  const risk = sql`abs(${signalOutcomes.entry_price} - ${signalOutcomes.sl})`;
+  const rMult = sql`case when ${signalOutcomes.sl} > 0 and ${risk} > 0 then ${move} / ${risk} end`;
+
+  const rows = await db
+    .select({
+      trades: sql<number>`count(*)::int`,
+      totalR: sql<number | null>`sum(${rMult})::float8`,
+      avgR: sql<number | null>`avg(${rMult})::float8`,
+      avgWinPct: sql<number | null>`avg(${pnl}) filter (where ${pnl} > 0)::float8`,
+      avgLossPct: sql<number | null>`avg(${pnl}) filter (where ${pnl} < 0)::float8`,
+    })
+    .from(signalOutcomes)
+    .where(
+      and(
+        eq(signalOutcomes.source, "signal"),
+        sql`${signalOutcomes.status} in ('TP_HIT','SL_HIT','EXPIRED')`,
+        isNotNull(signalOutcomes.hit_price),
+        realFilter(days),
+      ),
+    );
+  return rows[0] ?? { trades: 0, totalR: null, avgR: null, avgWinPct: null, avgLossPct: null };
 }
 
 // ── Manual trades (autodetected Bybit positions) ──────────────────────────────

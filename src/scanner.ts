@@ -4,7 +4,7 @@
 // highest combined-score signal.
 import type { AssetConfig, GlobalConfig, Rules, Env } from "./config.js";
 import type { Cache } from "./cache.js";
-import type { Notifier } from "./notify.js";
+import type { Notifier, ScanReply } from "./notify.js";
 import type { MarketContext, Signal, RegimeResult, TrendResult, StrategyKind } from "./types.js";
 import type { Db } from "./db/index.js";
 import { classifyRegime } from "./regime/engine.js";
@@ -42,6 +42,16 @@ export interface ScannerDeps {
   db: Db;
   getContext: ContextProvider;
 }
+
+export interface ScanOptions {
+  /** A user-initiated scan (e.g. Telegram /scan): reply with a full decision
+   *  briefing (regime/trend/S-R/detector verdicts) instead of a one-liner. */
+  manual?: boolean;
+}
+
+// Ticker normalization lives with the Bybit instrument resolver; re-exported
+// here for callers/tests that treat it as part of the scan surface.
+export { normalizeSymbol } from "./data/symbols.js";
 
 /** Combined score for ranking signals when multiple detectors fire. */
 function combinedScore(s: Signal): number {
@@ -82,11 +92,61 @@ function logScanDecision(
 }
 
 /**
- * Run the full pipeline for one symbol. Returns a one-line summary of the outcome
- * (alert / no-signal / gated / suppressed / error) so callers like the `/scan`
- * command can report the result; the scheduler ignores the return value.
+ * Decision briefing for a manual scan: the full market read plus a verdict, so
+ * the user can decide to take, skip, or wait — instead of a bare one-liner.
  */
-export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise<string> {
+function buildBriefing(
+  symbol: string,
+  price: number,
+  regime: RegimeResult,
+  trend: TrendResult,
+  sr: ReturnType<typeof buildSR>,
+  entries: DetectorEntry[],
+  verdict: string,
+): string {
+  const fmtPrice = (n: number) => {
+    const abs = Math.abs(n);
+    const dp = abs >= 1000 ? 2 : abs >= 1 ? 4 : 6;
+    return Number(n.toFixed(dp)).toString();
+  };
+  const lines = [
+    `🔍 ${symbol} @ ${fmtPrice(price)}`,
+    ``,
+    `Regime: ${regime.regime} (ADX ${regime.adx} · ATR %ile ${regime.atrPercentile})`,
+    `Trend 1h: ${trend.trend} ${trend.confidence}/100 (${trend.source})`,
+  ];
+  const srParts: string[] = [];
+  if (sr.support) srParts.push(`support ${sr.support.price.toFixed(4).replace(/\.?0+$/, "")} (${sr.support.strength})`);
+  if (sr.resistance) srParts.push(`resistance ${sr.resistance.price.toFixed(4).replace(/\.?0+$/, "")} (${sr.resistance.strength})`);
+  if (srParts.length) lines.push(`Levels: ${srParts.join(" · ")}`);
+
+  lines.push(``, `Detectors:`);
+  for (const { strategy, result } of entries) {
+    if (result.signal) {
+      const s = result.signal;
+      lines.push(`✅ ${strategy}: conf ${s.confidence} · quality ${s.setup_quality} · RR 1:${s.rr}`);
+    } else {
+      lines.push(`· ${strategy}: ${result.reason}`);
+    }
+  }
+  lines.push(``, verdict);
+  return lines.join("\n");
+}
+
+/**
+ * Run the full pipeline for one symbol. Returns the outcome (alert / no-signal /
+ * gated / suppressed / error) so callers like the `/scan` command can report the
+ * result; the scheduler ignores the return value. With `opts.manual` the text is
+ * a full decision briefing instead of one line, and when a candidate setup was
+ * detected but no alert fired (gated / already tracking / cooldown) the reply
+ * also carries the setup chart — no setup, no chart. When the signal passes
+ * gates the alert itself delivers the chart, so the briefing stays text-only.
+ */
+export async function scanSymbol(
+  asset: AssetConfig,
+  deps: ScannerDeps,
+  opts: ScanOptions = {},
+): Promise<ScanReply> {
   const { cache, notifier, rules, global, env, db } = deps;
   const minConfidence = asset.min_confidence ?? global.min_confidence;
 
@@ -99,7 +159,10 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     const ctx = await deps.getContext(asset.symbol, env.bybitCategory);
     if (ctx.candles15m.length < 60 || ctx.candles1h.length < 60) {
       logger.warn(`[scan] ${asset.symbol}: insufficient candle history, skipping`);
-      return `${asset.symbol}: insufficient candle history`;
+      if (opts.manual) {
+        return { text: `⚠ ${asset.symbol}: not enough candle history on Bybit (listing too new or illiquid) — can't scan reliably.` };
+      }
+      return { text: `${asset.symbol}: insufficient candle history` };
     }
 
     // Historical context = backfilled market_history (bulk bootstrap) merged with
@@ -136,12 +199,23 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
 
     if (candidates.length === 0) {
       logScanDecision(asset.symbol, regime, trend, entries, "no signal — all detectors rejected");
-      return `${asset.symbol}: no signal (regime ${regime.regime}, trend ${trend.trend})`;
+      if (opts.manual) {
+        // No setup → no chart: the briefing alone answers "skip".
+        return { text: buildBriefing(asset.symbol, price, regime, trend, sr, entries,
+          `Verdict: 😴 No setup — skip. Nothing actionable right now.`) };
+      }
+      return { text: `${asset.symbol}: no signal (regime ${regime.regime}, trend ${trend.trend})` };
     }
 
     // Pick the highest combined-score signal.
     candidates.sort((a, b) => combinedScore(b) - combinedScore(a));
     const signal = candidates[0]!;
+
+    // Setup chart for a manual briefing when no alert will fire (gated /
+    // already tracking / cooldown). renderChart returns null on failure, so a
+    // chart problem degrades the reply to text rather than failing the scan.
+    const briefingChart = async (): Promise<Buffer | null> =>
+      opts.manual ? renderChart(signal, ctx.candles15m) : null;
 
     // ── Gates ─────────────────────────────────────────────────────────────────
     let gateReason: string | null = null;
@@ -154,7 +228,14 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
     }
     if (gateReason) {
       logScanDecision(asset.symbol, regime, trend, entries, `gate: ${signal.strategy} ${gateReason}`);
-      return `${asset.symbol}: ${signal.strategy} gated — ${gateReason}`;
+      if (opts.manual) {
+        return {
+          text: buildBriefing(asset.symbol, price, regime, trend, sr, entries,
+            `Verdict: ⛔ ${signal.strategy} gated (${gateReason}) — skip for now.`),
+          chart: await briefingChart(),
+        };
+      }
+      return { text: `${asset.symbol}: ${signal.strategy} gated — ${gateReason}` };
     }
 
     // ── Active-signal registry (one active signal per symbol) ────────────────────
@@ -172,14 +253,34 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
         entries,
         `suppressed: active signal exists (#${openOutcome.id} ${openOutcome.status}, edge=${openOutcome.edge_state})`,
       );
-      return `${asset.symbol}: suppressed — active signal #${openOutcome.id} (${openOutcome.status}, edge ${openOutcome.edge_state})`;
+      if (opts.manual) {
+        const health = openOutcome.trade_health != null ? ` · health ${openOutcome.trade_health}` : "";
+        const pnl = openOutcome.management_snapshot?.pnl_pct;
+        const pnlStr = pnl != null ? ` · ${pnl >= 0 ? "+" : ""}${pnl}%` : "";
+        return {
+          text: buildBriefing(asset.symbol, price, regime, trend, sr, entries,
+            `Verdict: ⏸ Already tracking #${openOutcome.id} (${openOutcome.status}${health}${pnlStr}) — ` +
+              `manage the open trade instead (/running for details).`),
+          chart: await briefingChart(),
+        };
+      }
+      return { text: `${asset.symbol}: suppressed — active signal #${openOutcome.id} (${openOutcome.status}, edge ${openOutcome.edge_state})` };
     }
 
     // ── Cooldown ────────────────────────────────────────────────────────────────
     const cooldownKey = `cooldown:${asset.symbol}:${signal.strategy}`;
     if (await cache.get(cooldownKey)) {
       logScanDecision(asset.symbol, regime, trend, entries, `cooldown: suppressing duplicate ${signal.strategy}`);
-      return `${asset.symbol}: cooldown — ${signal.strategy} suppressed`;
+      if (opts.manual) {
+        return {
+          text: buildBriefing(asset.symbol, price, regime, trend, sr, entries,
+            `Verdict: 🕒 ${signal.strategy} ${signal.direction} is valid (conf ${signal.confidence}, ` +
+              `quality ${signal.setup_quality}, RR 1:${signal.rr}) but alerted recently — ` +
+              `decide on the existing alert.`),
+          chart: await briefingChart(),
+        };
+      }
+      return { text: `${asset.symbol}: cooldown — ${signal.strategy} suppressed` };
     }
     await cache.setex(cooldownKey, global.alert_cooldown_min * 60, "1");
 
@@ -238,16 +339,24 @@ export async function scanSymbol(asset: AssetConfig, deps: ScannerDeps): Promise
       }
     }
 
-    return (
+    if (opts.manual) {
+      // The alert message above already delivered the chart (with Follow/Skip),
+      // so the briefing reply stays text-only — no duplicate image.
+      return { text: buildBriefing(asset.symbol, price, regime, trend, sr, entries,
+        `Verdict: 🚨 Signal sent — ${signal.direction.toUpperCase()} ${signal.strategy} ` +
+          `(conf ${signal.confidence}, quality ${signal.setup_quality}, RR 1:${signal.rr})` +
+          (followable ? `. Decide with Follow / Skip on the alert.` : `.`)) };
+    }
+    return { text:
       `${asset.symbol}: ✅ ${signal.direction} ${signal.strategy} ` +
       `(conf ${signal.confidence}, quality ${signal.setup_quality}, RR 1:${signal.rr})` +
       (followable ? " — Follow to track" : "")
-    );
+    };
   } catch (err) {
     threw = true;
     recordScanError(asset.symbol, (err as Error).message);
     logger.error(`[scan] ${asset.symbol} failed: ${(err as Error).message}`);
-    return `${asset.symbol}: scan error — ${(err as Error).message}`;
+    return { text: `${asset.symbol}: scan error — ${(err as Error).message}` };
   } finally {
     if (!threw) recordScanSuccess(asset.symbol);
   }

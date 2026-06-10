@@ -279,6 +279,22 @@ function formatPricePct(entry: number, exit: number, direction: string): string 
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+/** Realized R-multiple vs the initial risk |entry − SL|; null when SL is unset
+ *  (Bybit positions without a stop use a 0 sentinel). */
+function realizedR(entry: number, exit: number, sl: number, direction: string): number | null {
+  const risk = Math.abs(entry - sl);
+  // Negated comparisons so NaN (malformed row) also bails out.
+  if (!(sl > 0) || !(risk > 0)) return null;
+  const move = direction === "long" ? exit - entry : entry - exit;
+  return move / risk;
+}
+
+/** " (+1.4R)" suffix, or empty when R is not computable. */
+function rSuffix(entry: number, exit: number, sl: number, direction: string): string {
+  const r = realizedR(entry, exit, sl, direction);
+  return r == null ? "" : ` (${r >= 0 ? "+" : ""}${r.toFixed(1)}R)`;
+}
+
 export function formatOutcome(
   outcome: OutcomeRow,
   status: OutcomeStatus,
@@ -289,7 +305,8 @@ export function formatOutcome(
   const dir = outcome.direction.toUpperCase();
   const duration = formatDuration(closedAt.getTime() - new Date(outcome.opened_at).getTime());
   const pctStr = hitPrice !== null
-    ? ` · ${formatPricePct(outcome.entry_price, hitPrice, outcome.direction)}`
+    ? ` · ${formatPricePct(outcome.entry_price, hitPrice, outcome.direction)}` +
+      rSuffix(outcome.entry_price, hitPrice, outcome.sl, outcome.direction)
     : "";
 
   return [
@@ -333,6 +350,17 @@ export function clampMessage(text: string, isPhoto: boolean): string {
 }
 
 // ── Notifier interface ──────────────────────────────────────────────────────
+
+/**
+ * A /scan reply: the decision briefing, plus the setup chart when a candidate
+ * setup was detected this pass (gated, cooling down, or already tracking — when
+ * the signal passes gates the alert itself carries the chart instead). No setup
+ * means no chart: text only.
+ */
+export interface ScanReply {
+  text: string;
+  chart?: Buffer | null;
+}
 
 /** Options for an outgoing signal alert. */
 export interface SendOptions {
@@ -401,8 +429,14 @@ export interface CommandHandlers {
   running: () => Promise<RunningView>;
   /** Details button — full breakdown for one tracked trade by outcome id. */
   onDetails: (outcomeId: number) => Promise<string>;
-  /** `/scan SYMBOL` — force a scan; returns the result summary. */
-  scan: (symbol: string) => Promise<string>;
+  /** `/scan SYMBOL` — force a scan; returns a decision briefing, with the setup
+   *  chart attached when a candidate setup was detected. The handler normalizes
+   *  tickers (zec → ZECUSDT), so any coin name works. */
+  scan: (symbol: string) => Promise<ScanReply>;
+  /** `/scan` with no args (or `all`) — scan every enabled watchlist symbol. */
+  scanAll: () => Promise<string>;
+  /** `/recent [n]` — last n closed trades with realized PnL (evaluation view). */
+  recent: (n?: number) => Promise<string>;
   /** Follow button — activate (track) the signal; returns a confirmation. */
   onFollow: (signalId: number) => Promise<string>;
   /** Skip button — dismiss/shadow the signal; returns a confirmation. */
@@ -477,6 +511,60 @@ export function formatPositionLive(
   }
   lines.push(``, `Updated ${hhmm(new Date())} · closes when you exit on Bybit`);
   return lines.join("\n");
+}
+
+// ── Closed-trade evaluation (/recent) ────────────────────────────────────────
+
+/**
+ * Last N closed trades with realized PnL — the user's evaluation view: every
+ * tracked trade's end state, win/loss, and duration in one glance.
+ */
+export function formatRecent(rows: OutcomeRow[]): string {
+  if (rows.length === 0) return "📒 No closed trades yet.";
+
+  let wins = 0;
+  let losses = 0;
+  let pnlSum = 0;
+  let pnlCount = 0;
+  let rSum = 0;
+  let rCount = 0;
+  const lines: string[] = [];
+
+  for (const o of rows) {
+    const emoji = OUTCOME_EMOJI[o.status] ?? "📊";
+    const dir = o.direction.toUpperCase();
+    const dur = o.duration_ms != null ? ` · ${formatDuration(o.duration_ms)}` : "";
+    let pnlStr = "";
+    if (o.hit_price != null && o.entry_price > 0) {
+      const pct =
+        o.direction === "long"
+          ? ((o.hit_price - o.entry_price) / o.entry_price) * 100
+          : ((o.entry_price - o.hit_price) / o.entry_price) * 100;
+      pnlSum += pct;
+      pnlCount++;
+      if (pct > 0) wins++;
+      else if (pct < 0) losses++;
+      pnlStr = ` · ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+      const r = realizedR(o.entry_price, o.hit_price, o.sl, o.direction);
+      if (r != null) {
+        rSum += r;
+        rCount++;
+        pnlStr += ` (${r >= 0 ? "+" : ""}${r.toFixed(1)}R)`;
+      }
+    }
+    lines.push(`${emoji} ${o.symbol} ${dir} · ${tradeSourceTag(o)}${pnlStr}${dur}`);
+  }
+
+  const header = [`📒 Last ${rows.length} closed trades`];
+  if (pnlCount > 0) {
+    const wr = Math.round((wins / Math.max(1, wins + losses)) * 100);
+    const avg = pnlSum / pnlCount;
+    header.push(`${wins}W/${losses}L (${wr}%) · avg ${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%`);
+  }
+  if (rCount > 0) {
+    header.push(`net ${rSum >= 0 ? "+" : ""}${rSum.toFixed(1)}R`);
+  }
+  return [header.join(" · "), "", ...lines].join("\n");
 }
 
 // ── Interactive /running view ────────────────────────────────────────────────
@@ -818,19 +906,53 @@ class TelegramNotifier implements Notifier {
       }
     });
 
+    // /scan — no args (or "all") scans the whole watchlist; otherwise any coin
+    // name works (handler normalizes "zec"/"BTC"/"wld" to the USDT perpetual).
+    // When a candidate setup was found the briefing arrives as the chart's
+    // caption (split into a reply if it outgrows the 1024-char caption limit);
+    // with no setup there is no chart — text only.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.command("scan", async (ctx: any) => {
       if (!authorized(ctx)) return;
-      const symbol = String(ctx.match ?? "").trim().toUpperCase();
-      if (!symbol) {
-        await ctx.reply("Usage: /scan SYMBOL (e.g. /scan ZECUSDT)");
-        return;
-      }
+      const arg = String(ctx.match ?? "").trim().toUpperCase();
       try {
-        await ctx.reply(`⏳ Scanning ${symbol}…`);
-        await ctx.reply(await handlers.scan(symbol));
+        if (!arg || arg === "ALL") {
+          await ctx.reply("⏳ Scanning all watchlist symbols…");
+          await ctx.reply(clampMessage(await handlers.scanAll(), false));
+          return;
+        }
+        await ctx.reply(`⏳ Scanning ${arg}…`);
+        const reply = await handlers.scan(arg);
+        if (reply.chart) {
+          try {
+            const [caption, overflow] = splitCaption(reply.text);
+            const { InputFile } = await import("grammy");
+            const msg = await ctx.replyWithPhoto(new InputFile(reply.chart, "chart.png"), { caption });
+            if (overflow) {
+              await ctx
+                .reply(clampMessage(overflow, false), { reply_parameters: { message_id: msg.message_id } })
+                .catch((err: Error) => logger.warn(`[notify] scan briefing overflow failed: ${err.message}`));
+            }
+            return;
+          } catch (err) {
+            logger.warn(`[notify] scan chart reply failed (${(err as Error).message}), falling back to text`);
+          }
+        }
+        await ctx.reply(clampMessage(reply.text, false));
       } catch (err) {
         await ctx.reply(`⚠ scan failed: ${(err as Error).message}`);
+      }
+    });
+
+    // /recent [n] — closed-trade evaluation view.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.command("recent", async (ctx: any) => {
+      if (!authorized(ctx)) return;
+      try {
+        const n = Number.parseInt(String(ctx.match ?? "").trim(), 10);
+        await ctx.reply(clampMessage(await handlers.recent(Number.isFinite(n) ? n : undefined), false));
+      } catch (err) {
+        await ctx.reply(`⚠ recent failed: ${(err as Error).message}`);
       }
     });
 
@@ -879,10 +1001,11 @@ class TelegramNotifier implements Notifier {
     // Advertise the commands in the Telegram UI (best-effort).
     this.bot.api
       .setMyCommands([
-        { command: "analytics", description: "performance report (optional: days, e.g. /analytics 7)" },
+        { command: "scan", description: "scan a coin (/scan zec) or everything (/scan)" },
+        { command: "running", description: "tracked trades with health & PnL" },
+        { command: "recent", description: "last closed trades with realized PnL" },
         { command: "status", description: "current open signals" },
-        { command: "running", description: "interactive list of tracked trades" },
-        { command: "scan", description: "force a scan, e.g. /scan ZECUSDT" },
+        { command: "analytics", description: "performance report (optional: days, e.g. /analytics 7)" },
       ])
       .catch(() => {});
 
