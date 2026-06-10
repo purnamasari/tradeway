@@ -183,13 +183,28 @@ engine (`src/analytics/`), surfaced three ways:
 - **Telegram digest** — a scheduled compact summary (weekly by default; see
   `analytics.digest_every_hours`), pushed via the notifier.
 - **HTTP** — `GET /analytics?days=N` on the health server returns the report as JSON.
-- **Telegram commands** — in loop mode the bot also *listens* for `/analytics [days]`
-  (digest on demand), `/status` (current open signals), and `/scan SYMBOL` (force a fresh
-  scan, e.g. `/scan ZECUSDT`, replying with the result). Commands are accepted only
-  from the configured `TELEGRAM_CHAT_ID`. Long-polling runs in the one loop-mode process,
-  so don't run a second loop-mode instance against the same bot token while it's live —
-  Telegram allows only one `getUpdates` poller per bot. (Send-only scripts like
-  `pnpm test:telegram` don't poll, so they're fine.)
+- **Telegram commands** — in loop mode the bot also *listens* for:
+  - `/scan zec` — scan **any** coin by name: tickers are normalized (`zec`/`BTC`/`wld` →
+    the USDT perpetual), validated against Bybit's live instrument list (typos get
+    "did you mean" suggestions; see `src/data/symbols.ts`), and symbols outside the
+    watchlist work too (REST fallback when the WS feed doesn't stream them). The reply
+    is a **decision briefing** — price, regime, 1h trend, S/R levels, every detector's
+    verdict, and a clear verdict line (signal sent / gated / cooldown / already
+    tracking / no setup) — so deciding to take or skip never requires reading logs.
+    When a candidate setup exists, the briefing arrives **with the setup chart**
+    (as its caption): gated/cooldown/already-tracking setups render the chart into
+    the reply, and a gate-passing setup delivers it on the alert itself. No setup,
+    no chart — a clean text "skip" instead.
+  - `/scan` (no args, or `/scan all`) — scan the entire watchlist, one summary line each.
+  - `/running` — tracked trades with health + live PnL and per-trade Details buttons.
+  - `/recent [n]` — last n closed trades with realized PnL% and R-multiples, win/loss
+    tally, net R, and durations (the evaluation view).
+  - `/status` (open signals), `/analytics [days]` (digest on demand).
+
+  Commands are accepted only from the configured `TELEGRAM_CHAT_ID`. Long-polling runs
+  in the one loop-mode process, so don't run a second loop-mode instance against the
+  same bot token while it's live — Telegram allows only one `getUpdates` poller per bot.
+  (Send-only scripts like `pnpm test:telegram` don't poll, so they're fine.)
 
 Metrics: overall + per-strategy/direction/symbol/regime win-rate and durations;
 **confidence calibration** (actual win-rate per `original_confidence` bucket);

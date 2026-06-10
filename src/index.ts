@@ -4,8 +4,9 @@
 import { loadWatchlist, loadRules, loadEnv, type AssetConfig } from "./config.js";
 import { createCache } from "./cache.js";
 import { createDb } from "./db/index.js";
-import { createNotifier, formatStatus, formatRunning, formatTradeDetails } from "./notify.js";
+import { createNotifier, formatStatus, formatRunning, formatTradeDetails, formatRecent } from "./notify.js";
 import { scanSymbol, type ScannerDeps, type ContextProvider } from "./scanner.js";
+import { resolveSymbol } from "./data/symbols.js";
 import { buildMarketContext } from "./data/market.js";
 import { buildMockContext } from "./data/mock.js";
 import {
@@ -16,6 +17,7 @@ import {
   createOutcome,
   fetchOpenOutcomeForSymbol,
   fetchOutcomeById,
+  fetchRecentClosedOutcomes,
   fetchSignalAlertRef,
 } from "./db/accumulate.js";
 import { reconcilePositions } from "./positions/reconciler.js";
@@ -233,9 +235,13 @@ async function main() {
   // the process (the default getContext stays buildMarketContext).
   if (useWs) {
     try {
+      const wsSymbols = new Set(enabled.map((a) => a.symbol));
       feed = new MarketFeed(enabled.map((a) => a.symbol), env.bybitCategory);
       await feed.start();
-      deps.getContext = (symbol) => feed!.getContext(symbol);
+      // The feed only streams watchlist symbols; ad-hoc scans of anything else
+      // (e.g. /scan WLD) fall back to per-call REST so EVERY ticker works.
+      deps.getContext = (symbol, category) =>
+        wsSymbols.has(symbol) ? feed!.getContext(symbol) : buildMarketContext(symbol, category);
       logger.info("[boot] market feed: websocket (streamed candles + ticker)");
     } catch (err) {
       logger.warn(`[boot] websocket feed failed to start (${(err as Error).message}) — falling back to REST`);
@@ -373,13 +379,26 @@ async function main() {
         const row = await fetchOutcomeById(database, outcomeId);
         return row ? formatTradeDetails(row) : "Trade not found.";
       },
-      scan: async (symbol) => {
+      scan: async (input) => {
+        // Bare coin names work: zec/BTC/wld resolve to their USDT perpetuals,
+        // validated against Bybit's live instrument list ("did you mean" on typos).
+        const resolved = await resolveSymbol(input, env.bybitCategory);
+        if (!resolved.ok) return { text: `⚠ ${resolved.error}` };
+        const symbol = resolved.symbol;
         const asset: AssetConfig =
           enabled.find((a) => a.symbol === symbol) ??
           watchlist.assets.find((a) => a.symbol === symbol) ??
           { symbol, enabled: true, scan_interval: 0, asset_class: "manual" };
-        return scanSymbol(asset, deps);
+        return scanSymbol(asset, deps, { manual: true });
       },
+      scanAll: async () => {
+        const results: string[] = [];
+        for (const asset of enabled) {
+          results.push((await scanSymbol(asset, deps)).text);
+        }
+        return [`📡 Watchlist scan (${enabled.length} symbols):`, "", ...results].join("\n");
+      },
+      recent: async (n) => formatRecent(await fetchRecentClosedOutcomes(database, n ?? 10)),
       onFollow: async (signalId) => {
         if (!(await setSignalDecision(database, signalId, "followed"))) return "Already decided.";
         const signal = await fetchSignalById(database, signalId);

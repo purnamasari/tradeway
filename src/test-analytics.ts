@@ -38,6 +38,7 @@ const report: AnalyticsReport = {
   factorEffectiveness: { winFunding: 91.3, lossFunding: 64.8, winOiZscore: -2.8, lossOiZscore: -1.1 },
   durations: { tpMs: 2.6 * 3600_000, slMs: 1.9 * 3600_000 },
   manualTrades: { open: 1, closed: 3, wins: 2, losses: 1, avgPnlPct: 3.41 },
+  pnl: { trades: 33, totalR: 11.4, avgR: 0.35, avgWinPct: 2.31, avgLossPct: -1.18 },
 };
 
 console.log(formatReportText(report));

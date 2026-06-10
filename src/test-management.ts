@@ -16,11 +16,18 @@ import {
   formatAlert,
   formatManagementEvent,
   formatTradeReport,
+  formatRecent,
   splitCaption,
   clampMessage,
   TG_CAPTION_LIMIT,
+  createNotifier,
 } from "./notify.js";
 import type { OutcomeRow } from "./db/accumulate.js";
+import { loadWatchlist, loadEnv } from "./config.js";
+import { createCache } from "./cache.js";
+import { scanSymbol, normalizeSymbol, type ScannerDeps } from "./scanner.js";
+import { matchSymbol } from "./data/symbols.js";
+import { buildMockContext } from "./data/mock.js";
 
 let failures = 0;
 function expect(label: string, ok: boolean, detail = "") {
@@ -270,8 +277,98 @@ async function main() {
     clampMessage("x".repeat(2000), true).length === TG_CAPTION_LIMIT,
   );
 
+  console.log("\n── ticker normalization ───────────────────────────────────");
+  expect("zec → ZECUSDT", normalizeSymbol("zec") === "ZECUSDT");
+  expect("' btc ' → BTCUSDT", normalizeSymbol(" btc ") === "BTCUSDT");
+  expect("wld → WLDUSDT", normalizeSymbol("wld") === "WLDUSDT");
+  expect("btc-usdt → BTCUSDT", normalizeSymbol("btc-usdt") === "BTCUSDT");
+  expect("ZECUSDT passes through", normalizeSymbol("ZECUSDT") === "ZECUSDT");
+  expect("BTCUSD (inverse) untouched", normalizeSymbol("BTCUSD") === "BTCUSD");
+  expect("empty stays empty", normalizeSymbol("  ") === "");
+
+  console.log("\n── symbol resolution (instrument matching) ────────────────");
+  const instruments = new Set(["BTCUSDT", "ETHUSDT", "ZECUSDT", "WLDUSDT", "SOLUSDC", "BTCPERP"]);
+  const hit = matchSymbol("zec", instruments);
+  expect("zec matches ZECUSDT", hit.ok && hit.symbol === "ZECUSDT");
+  const exact = matchSymbol("btcusdt", instruments);
+  expect("exact symbol matches", exact.ok && exact.symbol === "BTCUSDT");
+  const usdc = matchSymbol("sol", instruments);
+  expect("falls through quote suffixes", usdc.ok && usdc.symbol === "SOLUSDC");
+  const miss = matchSymbol("zwc", instruments);
+  expect("unknown coin rejected", !miss.ok);
+  const typo = matchSymbol("WL", instruments);
+  expect(
+    "typo offers suggestions",
+    !typo.ok && !typo.ok === true && typo.error.includes("WLDUSDT"),
+    !typo.ok ? typo.error : "",
+  );
+  const blank = matchSymbol("  ", instruments);
+  expect("blank input rejected", !blank.ok);
+
+  console.log("\n── manual scan briefing (mock pipeline) ───────────────────");
+  const env = loadEnv();
+  env.geminiApiKey = undefined;
+  env.telegramBotToken = undefined;
+  env.databaseUrl = undefined;
+  const watchlist = loadWatchlist();
+  const scanDeps: ScannerDeps = {
+    cache: await createCache(),
+    db: null,
+    notifier: await createNotifier(env),
+    rules,
+    global: watchlist.global,
+    env,
+    getContext: (symbol, category) => buildMockContext(symbol, category, "sweep"),
+  };
+  const briefingReply = await scanSymbol(
+    { symbol: "BTCUSDT", enabled: true, scan_interval: 0, asset_class: "manual" },
+    scanDeps,
+    { manual: true },
+  );
+  const briefing = briefingReply.text;
+  expect("briefing shows market read", briefing.includes("Regime:") && briefing.includes("Trend 1h:"));
+  expect("briefing lists detector verdicts", briefing.includes("Detectors:"));
+  expect("briefing ends with a verdict", briefing.includes("Verdict:"));
+  // Signal passed gates → the alert delivered the chart; the briefing must not
+  // duplicate it. (Gated/cooldown/tracking branches attach it instead.)
+  expect("alert-path briefing carries no extra chart", briefingReply.chart == null);
+
+  // Same pipeline but with an impossible confidence bar: the setup is gated, so
+  // the briefing itself must carry the setup chart for the user's decision.
+  const gatedReply = await scanSymbol(
+    { symbol: "BTCUSDT", enabled: true, scan_interval: 0, asset_class: "manual", min_confidence: 101 },
+    scanDeps,
+    { manual: true },
+  );
+  expect("gated briefing has a gate verdict", gatedReply.text.includes("gated"));
+  expect(
+    "gated briefing attaches the setup chart",
+    gatedReply.chart != null && gatedReply.chart.byteLength > 0,
+    gatedReply.chart == null ? "no chart buffer" : `${gatedReply.chart.byteLength} bytes`,
+  );
+
+  console.log("\n── /recent evaluation view ────────────────────────────────");
+  const closedRow = (over: Partial<OutcomeRow>): OutcomeRow =>
+    ({
+      symbol: "ZECUSDT", direction: "long", strategy: "momentum", source: "signal",
+      entry_price: 100, hit_price: 105, status: "TP_HIT", duration_ms: 3_600_000,
+      ...over,
+    }) as unknown as OutcomeRow;
+  const recent = formatRecent([
+    closedRow({ sl: 98 }),
+    closedRow({ status: "SL_HIT", hit_price: 97, direction: "long", strategy: "trend_pullback" }),
+    closedRow({ status: "CLOSED", source: "bybit", strategy: "manual", direction: "short", hit_price: 98 }),
+  ]);
+  expect("recent header counts wins/losses", recent.includes("2W/1L"), recent.split("\n")[0]);
+  expect("recent shows realized PnL", recent.includes("+5.00%") && recent.includes("-3.00%"));
+  expect("recent shows R-multiple when SL known", recent.includes("(+2.5R)"), recent);
+  expect("recent header sums net R", recent.includes("net +2.5R"), recent.split("\n")[0]);
+  expect("recent empty state", formatRecent([]) === "📒 No closed trades yet.");
+
   console.log("\n── formatted output samples ───────────────────────────────");
-  console.log("· Signal alert with plan + paths:\n");
+  console.log("· Manual scan briefing:\n");
+  console.log(briefing);
+  console.log("\n· Signal alert with plan + paths:\n");
   console.log(formatAlert(signal));
   console.log("\n· Management event alert:\n");
   console.log(formatManagementEvent("ZECUSDT", "long", sick.events[0]!, sick));

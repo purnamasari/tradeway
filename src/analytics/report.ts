@@ -13,12 +13,14 @@ import {
   factorEffectiveness,
   durations,
   manualTrades,
+  pnlEvaluation,
   type GroupRow,
   type CountsSummary,
   type ConfidenceDecay,
   type FactorEffectiveness,
   type Durations,
   type ManualTradesSummary,
+  type PnlEvaluation,
 } from "./queries.js";
 
 export interface RateRow {
@@ -44,6 +46,7 @@ export interface AnalyticsReport {
   factorEffectiveness: FactorEffectiveness;
   durations: Durations;
   manualTrades: ManualTradesSummary;
+  pnl: PnlEvaluation;
 }
 
 function winRate(wins: number, losses: number): number | null {
@@ -74,7 +77,7 @@ function sortRows(rows: RateRow[], asBuckets = false): RateRow[] {
 }
 
 export async function buildAnalyticsReport(db: NonNullable<Db>, days: number): Promise<AnalyticsReport> {
-  const [s, strat, dir, sym, reg, conf, edge, decay, factors, dur, manual] = await Promise.all([
+  const [s, strat, dir, sym, reg, conf, edge, decay, factors, dur, manual, pnl] = await Promise.all([
     summary(db, days),
     byStrategy(db, days),
     byDirection(db, days),
@@ -86,6 +89,7 @@ export async function buildAnalyticsReport(db: NonNullable<Db>, days: number): P
     factorEffectiveness(db, days),
     durations(db, days),
     manualTrades(db, days),
+    pnlEvaluation(db, days),
   ]);
 
   return {
@@ -102,7 +106,21 @@ export async function buildAnalyticsReport(db: NonNullable<Db>, days: number): P
     factorEffectiveness: factors,
     durations: dur,
     manualTrades: manual,
+    pnl,
   };
+}
+
+/** Realized P/L line for signal trades, or null when nothing has closed yet. */
+function pnlLine(p: PnlEvaluation): string | null {
+  if (p.trades === 0) return null;
+  const r = (n: number | null) =>
+    n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`;
+  const pc = (n: number | null) =>
+    n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+  return (
+    `P/L: ${r(p.totalR)} total · ${r(p.avgR)}/trade over ${p.trades} closed · ` +
+    `avg win ${pc(p.avgWinPct)} / loss ${pc(p.avgLossPct)}`
+  );
 }
 
 /** One-line manual-trades summary, or null when there are none to report. */
@@ -153,6 +171,8 @@ export function formatReportText(r: AnalyticsReport): string {
     `Signals: ${s.total} total · ${s.resolved} resolved · ${s.open} open · ${s.expired} expired`,
   );
   out.push(`Overall win-rate: ${pct(s.winRatePct)}  (${s.tp}W / ${s.sl}L)`);
+  const pl = pnlLine(r.pnl);
+  if (pl) out.push(pl);
   const ml = manualLine(r.manualTrades);
   if (ml) out.push(ml);
   out.push("");
@@ -188,6 +208,8 @@ export function formatDigest(r: AnalyticsReport): string {
   lines.push(`📊 Tradeaway digest · ${windowLabel(r.windowDays)}`);
   lines.push("");
   lines.push(`Win-rate: ${pct(s.winRatePct)} (${s.tp}W/${s.sl}L) · ${s.open} open · ${s.expired} expired`);
+  const pl = pnlLine(r.pnl);
+  if (pl) lines.push(pl);
   const ml = manualLine(r.manualTrades);
   if (ml) lines.push(ml);
 
