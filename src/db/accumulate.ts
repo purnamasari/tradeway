@@ -563,7 +563,8 @@ export async function fetchOpenBybitOutcomes(db: Db): Promise<OutcomeRow[]> {
   }
 }
 
-/** Most recently closed followed trades (for the /recent evaluation view). */
+/** Most recently closed followed trades, newest first (the /recent evaluation
+ *  card; its performance view reads up to 90 back). */
 export async function fetchRecentClosedOutcomes(db: Db, limit = 10): Promise<OutcomeRow[]> {
   if (!db) return [];
   try {
@@ -577,7 +578,7 @@ export async function fetchRecentClosedOutcomes(db: Db, limit = 10): Promise<Out
         ),
       )
       .orderBy(desc(signalOutcomes.closed_at))
-      .limit(Math.max(1, Math.min(limit, 50)));
+      .limit(Math.max(1, Math.min(limit, 200)));
     return rows as OutcomeRow[];
   } catch (err) {
     logger.warn(`[db] fetchRecentClosedOutcomes failed: ${(err as Error).message}`);

@@ -197,8 +197,17 @@ engine (`src/analytics/`), surfaced three ways:
     no chart — a clean text "skip" instead.
   - `/scan` (no args, or `/scan all`) — scan the entire watchlist, one summary line each.
   - `/running` — tracked trades with health + live PnL and per-trade Details buttons.
-  - `/recent [n]` — last n closed trades with realized PnL% and R-multiples, win/loss
-    tally, net R, and durations (the evaluation view).
+    Details opens an **interactive trade card**: a 5-second summary (verdict like
+    🟢 HOLD / 🟠 REDUCE / 🔴 EXIT, PnL with $ amount, confidence, SL → suggested SL,
+    TP, expected-path odds) with `📋 Action` / `📊 Analysis` / `🛡 Risk` buttons that
+    **edit the same message in place** (no scroll, no message spam); every section
+    carries its sibling tabs plus `⬅ Back` to the summary.
+  - `/recent [n]` — an **interactive evaluation card** over the last n closed trades
+    (default 10): the root scoreboard shows the streak, net R, win rate, $ PnL, and
+    best/worst trade, with `📋 View Trades` (numbered list, one button per trade →
+    result card → `🧠 Analysis`) and `📊 Performance` (net R over the last 10/30/90
+    trades, win rate, profit factor, expectancy, avg win/loss). Like the trade card,
+    every press edits the same message in place — one card, `⬅ Back` everywhere.
   - `/status` (open signals), `/analytics [days]` (digest on demand).
 
   Commands are accepted only from the configured `TELEGRAM_CHAT_ID`. Long-polling runs

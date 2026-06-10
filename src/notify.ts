@@ -427,16 +427,18 @@ export interface CommandHandlers {
   status: () => Promise<string>;
   /** `/running` — interactive list of everything tracked, with Details buttons. */
   running: () => Promise<RunningView>;
-  /** Details button — full breakdown for one tracked trade by outcome id. */
-  onDetails: (outcomeId: number) => Promise<string>;
+  /** Details button / trade-card view switches — the tracked row by outcome id.
+   *  The notifier renders the requested view from it (formatTradeView). */
+  getOutcome: (outcomeId: number) => Promise<OutcomeRow | null>;
   /** `/scan SYMBOL` — force a scan; returns a decision briefing, with the setup
    *  chart attached when a candidate setup was detected. The handler normalizes
    *  tickers (zec → ZECUSDT), so any coin name works. */
   scan: (symbol: string) => Promise<ScanReply>;
   /** `/scan` with no args (or `all`) — scan every enabled watchlist symbol. */
   scanAll: () => Promise<string>;
-  /** `/recent [n]` — last n closed trades with realized PnL (evaluation view). */
-  recent: (n?: number) => Promise<string>;
+  /** `/recent` evaluation card — the last `limit` closed trades, newest first.
+   *  The notifier renders the requested view from them (root/list/performance). */
+  recentClosed: (limit: number) => Promise<OutcomeRow[]>;
   /** Follow button — activate (track) the signal; returns a confirmation. */
   onFollow: (signalId: number) => Promise<string>;
   /** Skip button — dismiss/shadow the signal; returns a confirmation. */
@@ -513,58 +515,185 @@ export function formatPositionLive(
   return lines.join("\n");
 }
 
-// ── Closed-trade evaluation (/recent) ────────────────────────────────────────
+// ── Interactive evaluation card (/recent) ────────────────────────────────────
+// One message, four views, navigated with inline buttons that edit it in place:
+//   root (streak, net R, WR, $ PnL, best/worst)
+//     → 📋 View Trades  (numbered list + a button per trade)
+//         → one closed trade (result, $, levels, duration → 🧠 Analysis)
+//     → 📊 Performance  (net R over last 10/30/90, profit factor, expectancy)
+// Rows arrive newest-first (fetchRecentClosedOutcomes).
 
-/**
- * Last N closed trades with realized PnL — the user's evaluation view: every
- * tracked trade's end state, win/loss, and duration in one glance.
- */
-export function formatRecent(rows: OutcomeRow[]): string {
+export type RecentView = "root" | "list" | "perf";
+
+/** Realized result of one closed trade, derived from the recorded exit. */
+interface ClosedPnl {
+  pct: number;
+  r: number | null; // null when no usable SL (initial risk unknown)
+  usd: number | null; // null when position size is unknown (signal trades)
+}
+
+function closedPnl(o: OutcomeRow): ClosedPnl | null {
+  if (o.hit_price == null || !(o.entry_price > 0)) return null;
+  const pct =
+    o.direction === "long"
+      ? ((o.hit_price - o.entry_price) / o.entry_price) * 100
+      : ((o.entry_price - o.hit_price) / o.entry_price) * 100;
+  const r = realizedR(o.entry_price, o.hit_price, o.sl, o.direction);
+  const size = o.original_factors?.size;
+  const usd = size != null ? (pct / 100) * o.entry_price * size : null;
+  return { pct, r, usd };
+}
+
+/** "ZECUSDT" → "ZEC" for compact list lines (mirrors the resolver's suffixes). */
+export function coinName(symbol: string): string {
+  const base = symbol.replace(/(USDT|USDC|PERP|USD)$/, "");
+  return base || symbol;
+}
+
+function fmtR(r: number): string {
+  return `${r >= 0 ? "+" : ""}${r.toFixed(1)}R`;
+}
+
+function fmtUsd(usd: number): string {
+  return `${usd >= 0 ? "+" : "-"}$${Math.abs(usd).toFixed(2)}`;
+}
+
+function resultEmoji(p: ClosedPnl | null): string {
+  if (!p) return "⚪";
+  return p.pct > 0 ? "🟢" : p.pct < 0 ? "🔴" : "⚪";
+}
+
+/** Compact result tag: R when known, else %. */
+function resultTag(p: ClosedPnl): string {
+  return p.r != null ? fmtR(p.r) : signedPct(p.pct);
+}
+
+/** Root view — the 5-second scoreboard for the last N trades. HTML-formatted. */
+export function formatRecentRoot(rows: OutcomeRow[]): string {
   if (rows.length === 0) return "📒 No closed trades yet.";
+  const realized = rows
+    .map((o) => ({ o, p: closedPnl(o) }))
+    .filter((x): x is { o: OutcomeRow; p: ClosedPnl } => x.p !== null);
 
-  let wins = 0;
-  let losses = 0;
-  let pnlSum = 0;
-  let pnlCount = 0;
-  let rSum = 0;
-  let rCount = 0;
-  const lines: string[] = [];
+  const lines = [`<b>📒 Last ${rows.length} Trades</b>`, ``];
 
-  for (const o of rows) {
-    const emoji = OUTCOME_EMOJI[o.status] ?? "📊";
-    const dir = o.direction.toUpperCase();
-    const dur = o.duration_ms != null ? ` · ${formatDuration(o.duration_ms)}` : "";
-    let pnlStr = "";
-    if (o.hit_price != null && o.entry_price > 0) {
-      const pct =
-        o.direction === "long"
-          ? ((o.hit_price - o.entry_price) / o.entry_price) * 100
-          : ((o.entry_price - o.hit_price) / o.entry_price) * 100;
-      pnlSum += pct;
-      pnlCount++;
-      if (pct > 0) wins++;
-      else if (pct < 0) losses++;
-      pnlStr = ` · ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
-      const r = realizedR(o.entry_price, o.hit_price, o.sl, o.direction);
-      if (r != null) {
-        rSum += r;
-        rCount++;
-        pnlStr += ` (${r >= 0 ? "+" : ""}${r.toFixed(1)}R)`;
-      }
-    }
-    lines.push(`${emoji} ${o.symbol} ${dir} · ${tradeSourceTag(o)}${pnlStr}${dur}`);
+  if (realized.length === 0) {
+    lines.push(`No realized results yet (all expired before entry).`);
+    return lines.join("\n");
   }
 
-  const header = [`📒 Last ${rows.length} closed trades`];
-  if (pnlCount > 0) {
-    const wr = Math.round((wins / Math.max(1, wins + losses)) * 100);
-    const avg = pnlSum / pnlCount;
-    header.push(`${wins}W/${losses}L (${wr}%) · avg ${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%`);
+  // Last-5 form, newest first — one glance answers "how's it going lately".
+  const streak = realized.slice(0, 5).map((x) => resultEmoji(x.p)).join("");
+  lines.push(`<b>Current Streak:</b>`, streak, ``);
+
+  const withR = realized.filter((x) => x.p.r != null);
+  if (withR.length > 0) {
+    const netR = withR.reduce((s, x) => s + x.p.r!, 0);
+    lines.push(`Net: <b>${fmtR(netR)}</b> ${netR >= 0 ? "🟢" : "🔴"}`);
   }
-  if (rCount > 0) {
-    header.push(`net ${rSum >= 0 ? "+" : ""}${rSum.toFixed(1)}R`);
+  const wins = realized.filter((x) => x.p.pct > 0).length;
+  const losses = realized.filter((x) => x.p.pct < 0).length;
+  if (wins + losses > 0) {
+    lines.push(`WR: <b>${Math.round((wins / (wins + losses)) * 100)}%</b>`);
   }
-  return [header.join(" · "), "", ...lines].join("\n");
+  const withUsd = realized.filter((x) => x.p.usd != null);
+  const avgPct = realized.reduce((s, x) => s + x.p.pct, 0) / realized.length;
+  const usdPart = withUsd.length > 0 ? `<b>${fmtUsd(withUsd.reduce((s, x) => s + x.p.usd!, 0))}</b> ` : "";
+  lines.push(`PnL: ${usdPart}(${signedPct(avgPct)})`);
+
+  // Best/worst by R when available, else by %.
+  const score = (x: { p: ClosedPnl }) => x.p.r ?? x.p.pct;
+  const sorted = [...realized].sort((a, b) => score(b) - score(a));
+  const best = sorted[0]!;
+  const worst = sorted[sorted.length - 1]!;
+  lines.push(
+    ``,
+    `<b>Best:</b>`,
+    `${resultEmoji(best.p)} ${coinName(best.o.symbol)} <b>${resultTag(best.p)}</b>`,
+    ``,
+    `<b>Worst:</b>`,
+    `${resultEmoji(worst.p)} ${coinName(worst.o.symbol)} <b>${resultTag(worst.p)}</b>`,
+  );
+  return lines.join("\n");
+}
+
+/** Trades list view — numbered so the buttons below map 1:1. HTML-formatted. */
+export function formatRecentList(rows: OutcomeRow[]): string {
+  if (rows.length === 0) return "📒 No closed trades yet.";
+  const lines = [`<b>📒 Recent Trades</b>`, ``];
+  rows.forEach((o, i) => {
+    const p = closedPnl(o);
+    const res = p ? resultTag(p) : o.status.replace("_", " ");
+    lines.push(`${i + 1}. ${resultEmoji(p)} ${coinName(o.symbol)} ${o.direction.toUpperCase()} <b>${res}</b>`);
+  });
+  return lines.join("\n");
+}
+
+/** One closed trade — the result card behind a list button.
+ *  Minimal: R + $ + duration. Entry/exit/levels live in the 🧠 Analysis view.
+ *  HTML-formatted. */
+export function formatRecentTrade(o: OutcomeRow): string {
+  const p = closedPnl(o);
+  const dir = o.direction.toUpperCase();
+  const lines = [`<u><b>${resultEmoji(p)} ${o.symbol} ${dir}</b></u>`, ``];
+
+  if (p) {
+    if (p.r != null) lines.push(`<b>${fmtR(p.r)}</b>`);
+    else lines.push(`<b>${signedPct(p.pct)}</b>`);
+    if (p.usd != null) lines.push(fmtUsd(p.usd));
+    lines.push(``);
+  }
+
+  const dur = o.duration_ms != null ? formatDuration(o.duration_ms) : null;
+  if (dur) lines.push(`Duration: <b>${dur}</b>`);
+  return lines.join("\n");
+}
+
+/** Performance view — risk-normalized stats over the last up-to-90 trades.
+ *  Uses label-colon / value-on-next-line layout. HTML-formatted. */
+export function formatRecentPerformance(rows: OutcomeRow[]): string {
+  const realized = rows
+    .map((o) => ({ o, p: closedPnl(o) }))
+    .filter((x): x is { o: OutcomeRow; p: ClosedPnl } => x.p !== null);
+  if (realized.length === 0) return "📊 No realized trades to evaluate yet.";
+
+  const lines = [`<b>📊 Performance</b>`, ``];
+
+  // Net R windows (rows newest-first). Windows beyond history collapse to the
+  // last available window and the loop stops to avoid duplicates.
+  const netR = (k: number) => realized.slice(0, k).reduce((s, x) => s + (x.p.r ?? 0), 0);
+  for (const k of [10, 30, 90]) {
+    const window = Math.min(k, realized.length);
+    lines.push(`<b>Last ${window}:</b>`, `<b>${fmtR(netR(k))}</b>`, ``);
+    if (realized.length <= k) break;
+  }
+
+  const wins = realized.filter((x) => x.p.pct > 0);
+  const losses = realized.filter((x) => x.p.pct < 0);
+  if (wins.length + losses.length > 0) {
+    lines.push(
+      `<b>Win Rate:</b>`,
+      `<b>${Math.round((wins.length / (wins.length + losses.length)) * 100)}%</b>`,
+      ``,
+    );
+  }
+
+  const rWins = realized.filter((x) => (x.p.r ?? 0) > 0);
+  const rLosses = realized.filter((x) => (x.p.r ?? 0) < 0);
+  const grossWin = rWins.reduce((s, x) => s + x.p.r!, 0);
+  const grossLoss = Math.abs(rLosses.reduce((s, x) => s + x.p.r!, 0));
+  if (grossWin > 0 && grossLoss > 0) {
+    lines.push(`<b>Profit Factor:</b>`, `<b>${(grossWin / grossLoss).toFixed(2)}</b>`, ``);
+  }
+  const withR = realized.filter((x) => x.p.r != null);
+  if (withR.length > 0) {
+    const expectancy = withR.reduce((s, x) => s + x.p.r!, 0) / withR.length;
+    lines.push(`<b>Expectancy:</b>`, `<b>${fmtR(expectancy)}</b> / trade`, ``);
+  }
+  if (rWins.length > 0) lines.push(`<b>Avg Win:</b>`, `<b>${fmtR(grossWin / rWins.length)}</b>`, ``);
+  if (rLosses.length > 0) lines.push(`<b>Avg Loss:</b>`, `<b>${fmtR(-grossLoss / rLosses.length)}</b>`);
+
+  return lines.join("\n");
 }
 
 // ── Interactive /running view ────────────────────────────────────────────────
@@ -601,73 +730,199 @@ export function formatRunning(rows: OutcomeRow[]): RunningView {
   return { text: lines.join("\n"), trades };
 }
 
-/** Full edge/position breakdown for a single tracked trade (Details button). */
-export function formatTradeDetails(o: OutcomeRow): string {
-  const dir = o.direction.toUpperCase();
-  const lines = [`🔎 #${o.id} ${o.symbol} ${dir} · ${tradeSourceTag(o)}`, ``];
-  lines.push(`Status: ${o.status}${o.management_state === "MANAGED" ? " (managed)" : ""}`);
+// ── Interactive trade card (Details button) ──────────────────────────────────
+// One message, four views. The Details press shows a 5-second summary with
+// section buttons ([📋 Action] [📊 Analysis] [🛡 Risk]); pressing a section
+// EDITS the same message in place (no scroll, no new messages), and every
+// sub-view carries the sibling tabs plus ⬅ Back to the summary. All views
+// render from the persisted row alone — no market recompute.
 
-  if (o.source === "bybit") {
-    lines.push(`Entry: ${o.entry_price} · Size: ${o.original_factors?.size ?? "?"}`);
-    if (o.sl) lines.push(`SL: ${o.sl}`);
-    if (o.tp) lines.push(`TP: ${o.tp}`);
-    lines.push(formatManagementSection(o));
-    lines.push(``, `Auto-detected Bybit position. Closes when you exit on the exchange.`);
-    return lines.join("\n");
+export type TradeView = "summary" | "action" | "analysis" | "risk";
+
+const VIEW_LABEL: Record<Exclude<TradeView, "summary">, string> = {
+  action: "📋 Action",
+  analysis: "📊 Analysis",
+  risk: "🛡 Risk",
+};
+
+function signedPct(n: number, dp = 2): string {
+  return `${n >= 0 ? "+" : ""}${n.toFixed(dp)}%`;
+}
+
+/** One-glance verdict line: what should the user do with this trade right now. */
+function tradeVerdict(o: OutcomeRow): string {
+  if (o.status === "PENDING_ENTRY") return "⏳ WAITING ENTRY";
+  if (o.status !== "ACTIVE") return `${OUTCOME_EMOJI[o.status] ?? "📊"} ${o.status.replace("_", " ")}`;
+  const h = o.trade_health;
+  if (h == null) return "👀 MONITORING";
+  if (h < 40) return "🔴 EXIT";
+  if (h < 55) return "🟠 REDUCE";
+  return "🟢 HOLD";
+}
+
+/** Header shared by every view so the user never loses context mid-switch. */
+function tradeCardHeader(o: OutcomeRow, view: TradeView): string {
+  const where = `#${o.id} ${o.symbol} ${o.direction.toUpperCase()} · ${tradeSourceTag(o)}`;
+  return view === "summary" ? `${tradeVerdict(o)} · ${where}` : `${VIEW_LABEL[view]} · ${where}`;
+}
+
+/** The 5-second read: verdict, PnL, confidence, levels, expected path. */
+function formatTradeViewSummary(o: OutcomeRow): string {
+  const lines = [tradeCardHeader(o, "summary"), ``];
+
+  const snap = o.management_snapshot;
+  if (snap) {
+    let pnl = `PnL: ${signedPct(snap.pnl_pct)}`;
+    const size = o.original_factors?.size;
+    if (size != null && o.entry_price > 0) {
+      const usd = (snap.pnl_pct / 100) * o.entry_price * size;
+      pnl += ` (${usd >= 0 ? "+" : "-"}$${Math.abs(usd).toFixed(2)})`;
+    } else if (snap.pnl_r != null) {
+      pnl += ` (${snap.pnl_r >= 0 ? "+" : ""}${snap.pnl_r}R)`;
+    }
+    lines.push(pnl);
   }
+  const conf = o.live_confidence ?? o.trade_health;
+  if (conf != null) lines.push(`Confidence: ${conf}%`);
+  if (lines.length > 2) lines.push(``);
 
-  lines.push(`Edge: ${o.edge_state}`);
-  lines.push(`Confidence: ${o.original_confidence ?? "?"} → ${o.live_confidence ?? "?"}`);
-  lines.push(`Setup quality: ${o.original_setup_quality ?? "?"} → ${o.live_setup_quality ?? "?"}`);
-  lines.push(`Entry: ${o.entry_low}–${o.entry_high} · SL: ${o.sl} · TP: ${o.tp}`);
+  // Current stop → suggested stop, when the manager found a better one.
+  const slBase = o.sl > 0 ? String(o.sl) : "—";
+  lines.push(
+    o.suggested_stop != null && o.suggested_stop !== o.sl
+      ? `SL: ${slBase} → ${o.suggested_stop}`
+      : `SL: ${slBase}`,
+  );
+  lines.push(`TP: ${o.tp > 0 ? o.tp : "—"}`);
 
-  const of = o.original_factors;
-  const lf = o.live_factors;
-  if (of || lf) {
-    lines.push(``, `Factors (original → live):`);
-    const fmt = (a?: number, b?: number) =>
-      `${a != null ? Math.round(a) : "?"} → ${b != null ? Math.round(b) : "?"}`;
-    lines.push(`  Funding %ile: ${fmt(of?.funding_percentile, lf?.funding_percentile)}`);
-    lines.push(`  OI z-score: ${of?.oi_zscore?.toFixed(1) ?? "?"} → ${lf?.oi_zscore?.toFixed(1) ?? "?"}`);
-    lines.push(`  Trend: ${of?.trend ?? "?"} → ${lf?.trend ?? "?"}`);
+  if (o.path_probs) {
+    const p = o.path_probs;
+    lines.push(
+      ``,
+      `Path:`,
+      `🎯 TP Direct: ${p.tp_direct}%`,
+      `🔄 Retest First: ${p.retest_then_tp}%`,
+      `❌ SL: ${p.sl_hit}%`,
+    );
   }
-  lines.push(formatManagementSection(o));
   return lines.join("\n");
 }
 
-/** Persisted management state rendered from the row alone (no market recompute). */
-function formatManagementSection(o: OutcomeRow): string {
-  const lines: string[] = [];
-  if (o.trade_health != null) {
-    lines.push(``, `Trade health: ${o.trade_health}/100 (${HEALTH_LABEL[healthBand(o.trade_health)]})`);
-    const h = o.health_components;
-    if (h) {
-      lines.push(
-        `  Structure ${h.structure} · Momentum ${h.momentum} · Volume ${h.volume} · Trend ${h.trend_alignment} · Risk ${h.risk_protection}`,
-      );
-    }
-  }
+/** What to do: the manager's ordered suggestions + live exit conditions. */
+function formatTradeViewAction(o: OutcomeRow): string {
+  const lines = [tradeCardHeader(o, "action"), ``];
   const snap = o.management_snapshot;
-  if (snap) {
-    lines.push(`PnL: ${snap.pnl_pct >= 0 ? "+" : ""}${snap.pnl_pct}% @ ${snap.price}`);
-    for (const ob of snap.observations) lines.push(`✓ ${ob}`);
-    for (const w of snap.warnings) lines.push(`⚠ ${w}`);
-    if (snap.actions.length > 0) {
-      lines.push(`Suggested actions:`);
-      snap.actions.forEach((a, i) => lines.push(`${i + 1}. ${a}`));
-    }
-    if (snap.emergency.length > 0) {
-      lines.push(`Exit immediately if:`);
-      for (const e of snap.emergency) lines.push(`• ${e}`);
-    }
+
+  const actions = snap?.actions ?? [];
+  if (actions.length > 0) {
+    lines.push(`Recommended:`);
+    actions.forEach((a, i) => lines.push(`${i + 1}. ${a}`));
   } else if (o.suggested_stop != null) {
-    lines.push(`Suggested stop: ${o.suggested_stop} (${o.suggested_stop_method ?? "adaptive"})`);
+    lines.push(`Recommended:`, `1. Move SL → ${o.suggested_stop} (${o.suggested_stop_method ?? "adaptive"})`);
+  } else {
+    lines.push(`No action needed — let it run.`);
   }
-  if (o.path_probs) {
-    const p = o.path_probs;
-    lines.push(`Path → TP direct ${p.tp_direct}% · retest first ${p.retest_then_tp}% · SL ${p.sl_hit}%`);
+
+  // Live emergency conditions; fall back to the plan's triggers from detection time.
+  const emergency =
+    snap?.emergency && snap.emergency.length > 0
+      ? snap.emergency
+      : (o.management_plan?.emergency.map((r) => r.trigger) ?? []);
+  if (emergency.length > 0) {
+    lines.push(``, `Exit if:`);
+    for (const e of emergency) lines.push(`• ${e}`);
   }
   return lines.join("\n");
+}
+
+/** Why: health component scores plus the manager's observations and warnings. */
+function formatTradeViewAnalysis(o: OutcomeRow): string {
+  const lines = [tradeCardHeader(o, "analysis"), ``];
+  const h = o.health_components;
+  if (h) {
+    lines.push(
+      `Structure: ${h.structure}`,
+      `Momentum: ${h.momentum}`,
+      `Volume: ${h.volume}`,
+      `Trend: ${h.trend_alignment}`,
+      `Risk: ${h.risk_protection}`,
+    );
+  }
+  if (o.live_confidence != null && o.original_confidence != null) {
+    lines.push(``, `Confidence: ${o.original_confidence} → ${o.live_confidence} (edge ${o.edge_state})`);
+  }
+
+  const snap = o.management_snapshot;
+  if (snap) {
+    if (snap.observations.length > 0) {
+      lines.push(``);
+      for (const ob of snap.observations) lines.push(`✓ ${ob}`);
+    }
+    if (snap.warnings.length > 0) {
+      lines.push(``);
+      for (const w of snap.warnings) lines.push(`⚠ ${w}`);
+    }
+  }
+  if (!h && !snap) {
+    lines.push(`Manager hasn't assessed this trade yet — it scans every minute.`);
+  }
+  return lines.join("\n");
+}
+
+const RISK_LEVEL: Record<string, string> = {
+  excellent: "Low",
+  healthy: "Low",
+  neutral: "Medium",
+  weak: "High",
+  exit_candidate: "Critical",
+};
+
+/** Exposure: remaining RR from the current price, risk level, weakest factor. */
+function formatTradeViewRisk(o: OutcomeRow): string {
+  const lines = [tradeCardHeader(o, "risk"), ``];
+
+  const price = o.management_snapshot?.price ?? o.entry_price;
+  if (o.sl > 0 && o.tp > 0 && price > 0) {
+    const reward = Math.abs(o.tp - price);
+    const risk = Math.abs(price - o.sl);
+    if (risk > 0) lines.push(`Current RR: ${(reward / risk).toFixed(1)}`);
+    lines.push(`Stop distance: ${((risk / price) * 100).toFixed(2)}%`);
+  } else if (!(o.sl > 0)) {
+    lines.push(`⚠ No stop set — unbounded risk.`);
+  }
+
+  if (o.trade_health != null) {
+    const band = healthBand(o.trade_health);
+    lines.push(``, `Risk: ${RISK_LEVEL[band] ?? "Medium"}`, `Trade Health: ${o.trade_health}/100 (${HEALTH_LABEL[band]})`);
+    const h = o.health_components;
+    if (h) {
+      const factors: Array<[string, number]> = [
+        ["Structure", h.structure],
+        ["Momentum", h.momentum],
+        ["Volume", h.volume],
+        ["Trend", h.trend_alignment],
+        ["Risk protection", h.risk_protection],
+      ];
+      factors.sort((a, b) => a[1] - b[1]);
+      const [name, value] = factors[0]!;
+      lines.push(``, `Weakest factor: ${name} (${value})`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/** Render one view of the interactive trade card. */
+export function formatTradeView(view: TradeView, o: OutcomeRow): string {
+  switch (view) {
+    case "action":
+      return formatTradeViewAction(o);
+    case "analysis":
+      return formatTradeViewAnalysis(o);
+    case "risk":
+      return formatTradeViewRisk(o);
+    default:
+      return formatTradeViewSummary(o);
+  }
 }
 
 class ConsoleNotifier implements Notifier {
@@ -760,6 +1015,43 @@ class TelegramNotifier implements Notifier {
     const { InlineKeyboard } = await import("grammy");
     const kb = new InlineKeyboard();
     for (const t of trades) kb.text(t.label, `details:${t.id}`).row();
+    return kb;
+  }
+
+  /** Navigation for the /recent evaluation card. The list view gets one button
+   *  per trade (two per row), labeled to match its numbered lines. */
+  private async recentKeyboard(view: RecentView, n: number, rows?: OutcomeRow[]) {
+    const { InlineKeyboard } = await import("grammy");
+    const kb = new InlineKeyboard();
+    if (view === "root") {
+      kb.text("📋 View Trades", `rc:list:${n}`).text("📊 Performance", `rc:perf:${n}`);
+    } else if (view === "list") {
+      const listed = rows ?? [];
+      listed.forEach((o, i) => {
+        kb.text(`#${i + 1} ${coinName(o.symbol)}`, `rc:trade:${o.id}:${n}`);
+        if (i % 2 === 1) kb.row();
+      });
+      if (listed.length % 2 === 1) kb.row();
+      kb.text("⬅ Back", `rc:root:${n}`);
+    } else {
+      kb.text("⬅ Back", `rc:root:${n}`);
+    }
+    return kb;
+  }
+
+  /** Navigation for the interactive trade card: the summary offers the three
+   *  sections; a section offers its siblings plus ⬅ Back. Pressing any of these
+   *  edits the SAME message in place — one card, no scroll. */
+  private async tradeViewKeyboard(outcomeId: number, view: TradeView) {
+    const { InlineKeyboard } = await import("grammy");
+    const kb = new InlineKeyboard();
+    const sections: Array<Exclude<TradeView, "summary">> = ["action", "analysis", "risk"];
+    if (view === "summary") {
+      for (const s of sections) kb.text(VIEW_LABEL[s], `tv:${s}:${outcomeId}`);
+    } else {
+      for (const s of sections.filter((s) => s !== view)) kb.text(VIEW_LABEL[s], `tv:${s}:${outcomeId}`);
+      kb.row().text("⬅ Back", `tv:summary:${outcomeId}`);
+    }
     return kb;
   }
 
@@ -944,15 +1236,90 @@ class TelegramNotifier implements Notifier {
       }
     });
 
-    // /recent [n] — closed-trade evaluation view.
+    // /recent [n] — interactive evaluation card. The root scoreboard carries
+    // [📋 View Trades] [📊 Performance]; every press edits the same message.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.command("recent", async (ctx: any) => {
       if (!authorized(ctx)) return;
       try {
-        const n = Number.parseInt(String(ctx.match ?? "").trim(), 10);
-        await ctx.reply(clampMessage(await handlers.recent(Number.isFinite(n) ? n : undefined), false));
+        const parsed = Number.parseInt(String(ctx.match ?? "").trim(), 10);
+        const n = Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 30)) : 10;
+        const rows = await handlers.recentClosed(n);
+        await ctx.reply(clampMessage(formatRecentRoot(rows), false), {
+          parse_mode: "HTML",
+          reply_markup: rows.length > 0 ? await this.recentKeyboard("root", n) : undefined,
+        });
       } catch (err) {
         await ctx.reply(`⚠ recent failed: ${(err as Error).message}`);
+      }
+    });
+
+    // Evaluation-card navigation. rc:<view>:<n> switches root/list/perf;
+    // rc:trade:<id>:<n> opens one closed trade; rc:tanalysis:<id>:<n> shows its
+    // persisted analysis (same renderer as the live trade card). All of them
+    // EDIT the originating message in place — one card, no scroll.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.callbackQuery(/^rc:(root|list|perf):(\d+)$/, async (ctx: any) => {
+      if (!authorized(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      try {
+        const view = ctx.match?.[1] as RecentView;
+        const n = Number(ctx.match?.[2]);
+        // Performance looks further back than the list so streaks/expectancy
+        // stabilize; the other views honor the requested window.
+        const rows = await handlers.recentClosed(view === "perf" ? Math.max(n, 90) : n);
+        await ctx.answerCallbackQuery();
+        const text =
+          view === "list" ? formatRecentList(rows) :
+          view === "perf" ? formatRecentPerformance(rows) :
+          formatRecentRoot(rows);
+        await ctx.editMessageText(clampMessage(text, false), {
+          parse_mode: "HTML",
+          reply_markup: await this.recentKeyboard(view, n, rows),
+        });
+      } catch (err) {
+        const msg = (err as Error).message ?? "";
+        if (!msg.includes("message is not modified")) {
+          logger.warn(`[notify] recent view switch failed: ${msg}`);
+        }
+        await ctx.answerCallbackQuery().catch(() => {});
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.callbackQuery(/^rc:(trade|tanalysis):(\d+):(\d+)$/, async (ctx: any) => {
+      if (!authorized(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      try {
+        const kind = ctx.match?.[1] as "trade" | "tanalysis";
+        const id = Number(ctx.match?.[2]);
+        const n = Number(ctx.match?.[3]);
+        const row = await handlers.getOutcome(id);
+        await ctx.answerCallbackQuery();
+        if (!row) {
+          await ctx.editMessageText("Trade not found.").catch(() => {});
+          return;
+        }
+        const { InlineKeyboard } = await import("grammy");
+        if (kind === "trade") {
+          const kb = new InlineKeyboard()
+            .text("\uD83E\uDDE0 Analysis", `rc:tanalysis:${id}:${n}`)
+            .text("\u2B05 Back", `rc:list:${n}`);
+          await ctx.editMessageText(clampMessage(formatRecentTrade(row), false), { parse_mode: "HTML", reply_markup: kb });
+        } else {
+          const kb = new InlineKeyboard().text("\u2B05 Back", `rc:trade:${id}:${n}`);
+          await ctx.editMessageText(clampMessage(formatTradeView("analysis", row), false), { reply_markup: kb });
+        }
+      } catch (err) {
+        const msg = (err as Error).message ?? "";
+        if (!msg.includes("message is not modified")) {
+          logger.warn(`[notify] recent trade view failed: ${msg}`);
+        }
+        await ctx.answerCallbackQuery().catch(() => {});
       }
     });
 
@@ -978,8 +1345,9 @@ class TelegramNotifier implements Notifier {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.callbackQuery(/^skip:(\d+)$/, (ctx: any) => handleAction(ctx, handlers.onSkip));
 
-    // Details button on the /running list — replies with the full breakdown. Unlike
-    // Follow/Skip it is repeatable, so the keyboard is left intact.
+    // Details button (/running list, management alerts) — opens the interactive
+    // trade card: a 5-second summary with section buttons. Repeatable, so the
+    // originating keyboard is left intact.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.bot.callbackQuery(/^details:(\d+)$/, async (ctx: any) => {
       if (!authorized(ctx)) {
@@ -987,11 +1355,49 @@ class TelegramNotifier implements Notifier {
         return;
       }
       try {
-        const reply = await handlers.onDetails(Number(ctx.match?.[1]));
+        const id = Number(ctx.match?.[1]);
+        const row = await handlers.getOutcome(id);
         await ctx.answerCallbackQuery();
-        await ctx.reply(reply);
+        if (!row) {
+          await ctx.reply("Trade not found.");
+          return;
+        }
+        await ctx.reply(clampMessage(formatTradeView("summary", row), false), {
+          reply_markup: await this.tradeViewKeyboard(id, "summary"),
+        });
       } catch (err) {
-        await ctx.answerCallbackQuery({ text: `error: ${(err as Error).message}` });
+        await ctx.answerCallbackQuery({ text: `error: ${(err as Error).message}` }).catch(() => {});
+      }
+    });
+
+    // Trade-card navigation — Action/Analysis/Risk/Back. Edits the card message
+    // in place (one message, no scroll) and re-reads the row so every switch
+    // shows the latest persisted state.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.bot.callbackQuery(/^tv:(summary|action|analysis|risk):(\d+)$/, async (ctx: any) => {
+      if (!authorized(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      try {
+        const view = ctx.match?.[1] as TradeView;
+        const id = Number(ctx.match?.[2]);
+        const row = await handlers.getOutcome(id);
+        await ctx.answerCallbackQuery();
+        if (!row) {
+          await ctx.editMessageText("Trade not found.").catch(() => {});
+          return;
+        }
+        await ctx.editMessageText(clampMessage(formatTradeView(view, row), false), {
+          reply_markup: await this.tradeViewKeyboard(id, view),
+        });
+      } catch (err) {
+        const msg = (err as Error).message ?? "";
+        // Re-pressing the current section is a harmless no-op edit.
+        if (!msg.includes("message is not modified")) {
+          logger.warn(`[notify] trade view switch failed: ${msg}`);
+        }
+        await ctx.answerCallbackQuery().catch(() => {});
       }
     });
 
@@ -1003,7 +1409,7 @@ class TelegramNotifier implements Notifier {
       .setMyCommands([
         { command: "scan", description: "scan a coin (/scan zec) or everything (/scan)" },
         { command: "running", description: "tracked trades with health & PnL" },
-        { command: "recent", description: "last closed trades with realized PnL" },
+        { command: "recent", description: "evaluation card: streak, net R, per-trade results" },
         { command: "status", description: "current open signals" },
         { command: "analytics", description: "performance report (optional: days, e.g. /analytics 7)" },
       ])

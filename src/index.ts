@@ -4,7 +4,7 @@
 import { loadWatchlist, loadRules, loadEnv, type AssetConfig } from "./config.js";
 import { createCache } from "./cache.js";
 import { createDb } from "./db/index.js";
-import { createNotifier, formatStatus, formatRunning, formatTradeDetails, formatRecent } from "./notify.js";
+import { createNotifier, formatStatus, formatRunning } from "./notify.js";
 import { scanSymbol, type ScannerDeps, type ContextProvider } from "./scanner.js";
 import { resolveSymbol } from "./data/symbols.js";
 import { buildMarketContext } from "./data/market.js";
@@ -375,10 +375,8 @@ async function main() {
       // /running covers everything tracked: followed signals AND autodetected Bybit
       // positions (both are followed=true), so one fetch returns the full list.
       running: async () => formatRunning(await fetchOpenOutcomes(database, { followedOnly: true })),
-      onDetails: async (outcomeId) => {
-        const row = await fetchOutcomeById(database, outcomeId);
-        return row ? formatTradeDetails(row) : "Trade not found.";
-      },
+      // The notifier renders the interactive trade card from the raw row.
+      getOutcome: (outcomeId) => fetchOutcomeById(database, outcomeId),
       scan: async (input) => {
         // Bare coin names work: zec/BTC/wld resolve to their USDT perpetuals,
         // validated against Bybit's live instrument list ("did you mean" on typos).
@@ -398,7 +396,8 @@ async function main() {
         }
         return [`📡 Watchlist scan (${enabled.length} symbols):`, "", ...results].join("\n");
       },
-      recent: async (n) => formatRecent(await fetchRecentClosedOutcomes(database, n ?? 10)),
+      // The notifier renders the /recent evaluation card from the raw rows.
+      recentClosed: (limit) => fetchRecentClosedOutcomes(database, limit),
       onFollow: async (signalId) => {
         if (!(await setSignalDecision(database, signalId, "followed"))) return "Already decided.";
         const signal = await fetchSignalById(database, signalId);
