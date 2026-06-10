@@ -158,6 +158,24 @@ export const signalOutcomes = pgTable(
     // instead of a new message per change. is_photo selects caption vs text edit.
     notify_message_id: integer("notify_message_id"),
     notify_is_photo: boolean("notify_is_photo").notNull().default(false),
+
+    // ── Trade management (orthogonal to price `status` and `edge_state`) ───────
+    // NONE → MONITORING (manager has scanned it) → MANAGED (>=1 action suggested).
+    // Together with `status` this is the user-facing lifecycle: PENDING_ENTRY=PENDING,
+    // ACTIVE=FILLED/ACTIVE, ACTIVE+MANAGED=MANAGED, terminal status=EXITED.
+    management_state: text("management_state").notNull().default("NONE"),
+    trade_health: integer("trade_health"), // latest 0-100 health total
+    health_components: jsonb("health_components"), // HealthComponents breakdown
+    suggested_stop: real("suggested_stop"), // latest adaptive stop suggestion
+    suggested_stop_method: text("suggested_stop_method"), // swing|atr|ema|structure
+    management_plan: jsonb("management_plan"), // ManagementPlan, generated at signal time
+    path_probs: jsonb("path_probs"), // latest PathProbabilities (seeded at creation)
+    // Latest full assessment surface (observations/warnings/actions/emergency) so
+    // /running Details can render the trade report without recomputing market data.
+    management_snapshot: jsonb("management_snapshot"),
+    // Manager bookkeeping (event cooldowns, last health band, throttle timestamps).
+    // One JSONB blob: bookkeeping only, never queried.
+    management_meta: jsonb("management_meta"),
   },
   (t) => [
     index("idx_outcome_status").on(t.status),
@@ -171,6 +189,32 @@ export const signalOutcomes = pgTable(
 // meaningfully changes (state change, confidence delta, or sparse heartbeat). Raw
 // data for analyzing confidence decay and factor evolution — cannot be
 // reconstructed retroactively, so it is captured as it happens.
+// ── trade_management_events ───────────────────────────────────────────────────
+// Management-event time series: one row per notified event plus throttled health
+// heartbeats (kind='health_snapshot'). Like signal_edge_updates, this is raw
+// history that cannot be reconstructed retroactively — captured as it happens,
+// write-gated by the manager to bound row growth.
+export const tradeManagementEvents = pgTable(
+  "trade_management_events",
+  {
+    id: serial("id").primaryKey(),
+    outcome_id: integer("outcome_id").notNull(),
+    symbol: text("symbol").notNull(),
+    recorded_at: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+    kind: text("kind").notNull(), // ManagementEventKind
+    severity: text("severity").notNull(), // info | warning | critical
+    trade_health: integer("trade_health"),
+    current_confidence: integer("current_confidence"),
+    price: real("price"),
+    pnl_pct: real("pnl_pct"),
+    suggested_stop: real("suggested_stop"),
+    details: jsonb("details"), // event happened/actions, health components, paths
+  },
+  (t) => [
+    index("idx_mgmt_event_outcome_time").on(t.outcome_id, t.recorded_at),
+  ],
+);
+
 export const signalEdgeUpdates = pgTable(
   "signal_edge_updates",
   {

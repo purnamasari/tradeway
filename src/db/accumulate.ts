@@ -2,10 +2,25 @@
 // building percentile/z-score windows over time.
 // Also handles signal outcome persistence.
 import type { Db } from "./index.js";
-import type { Candle, MarketContext, RegimeResult, TrendResult, Signal, StrategyKind, EdgeState, Direction } from "../types.js";
+import type {
+  Candle,
+  MarketContext,
+  RegimeResult,
+  TrendResult,
+  Signal,
+  StrategyKind,
+  EdgeState,
+  Direction,
+  ManagementState,
+  ManagementPlan,
+  ManagementSeverity,
+  PathProbabilities,
+  HealthComponents,
+  StopMethod,
+} from "../types.js";
 import type { Rules } from "../config.js";
 import { ENTRY_TTL } from "../types.js";
-import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes, signalEdgeUpdates } from "./schema.js";
+import { metricHistory, marketHistory, signals as signalsTable, regimeLog, signalOutcomes, signalEdgeUpdates, tradeManagementEvents } from "./schema.js";
 import { atr, adx, ema, atrSeries } from "../indicators.js";
 import { logger } from "../logger.js";
 import { asc, desc, eq, gte, lt, and, sql, inArray, isNotNull, isNull } from "drizzle-orm";
@@ -259,6 +274,9 @@ export async function createOutcome(
         trend: signal.trend,
         regime: signal.regime,
       },
+      // ── Trade management seed: plan + expected paths from detection time ───
+      management_plan: signal.plan ?? null,
+      path_probs: signal.paths ?? null,
     });
     logger.info(`[outcome] Created PENDING_ENTRY${followed ? "" : " (shadow)"} for ${signal.symbol} ${signal.direction} ${signal.strategy} (signal #${signalId})`);
   } catch (err) {
@@ -302,6 +320,49 @@ export interface OutcomeRow {
   last_recorded_confidence: number | null;
   notify_message_id: number | null;
   notify_is_photo: boolean;
+  // Trade management
+  management_state: string; // ManagementState
+  trade_health: number | null;
+  health_components: HealthComponents | null;
+  suggested_stop: number | null;
+  suggested_stop_method: string | null;
+  management_plan: ManagementPlan | null;
+  path_probs: PathProbabilities | null;
+  management_snapshot: ManagementSnapshot | null;
+  management_meta: ManagementMeta | null;
+}
+
+/** Latest assessment surface persisted for on-demand rendering (/running Details). */
+export interface ManagementSnapshot {
+  observations: string[];
+  warnings: string[];
+  actions: string[];
+  emergency: string[];
+  pnl_pct: number;
+  pnl_r: number | null;
+  price: number;
+  updated_at: string; // ISO
+}
+
+/** Manager bookkeeping — cooldowns, latches, and throttle timestamps. */
+export interface ManagementMeta {
+  /** Initial |entry−SL| captured on first manage pass (Bybit SLs can move later). */
+  initial_risk?: number | null;
+  /** Last alert timestamp (ms) per event kind, for cooldowns. */
+  alerted?: Record<string, number>;
+  /** Event kinds present on the previous pass — a persisting condition alerts once. */
+  latched?: string[];
+  /** True once a profit-locking stop suggestion has been alerted. */
+  stop_locked?: boolean;
+  /** Health band at the last notified report, for band-change detection. */
+  last_band?: string;
+  /** Health total at the last alert, for health_alert_drop gating. */
+  last_alert_health?: number;
+  /** Last in-place report edit (ms). */
+  last_report_at?: number;
+  /** Last history heartbeat (ms) + health written, for the write gate. */
+  last_history_at?: number;
+  last_history_health?: number;
 }
 
 /** A Telegram message reference to edit in place (anti-spam refresh). */
@@ -567,6 +628,70 @@ export async function recordEdgeUpdate(db: Db, row: EdgeUpdateRow): Promise<void
   }
 }
 
+// ── Trade management persistence ──────────────────────────────────────────────
+
+export interface ManagementUpdate {
+  management_state: ManagementState;
+  trade_health: number;
+  health_components: HealthComponents;
+  suggested_stop: number | null;
+  suggested_stop_method: StopMethod | null;
+  path_probs: PathProbabilities | null;
+  management_snapshot: ManagementSnapshot;
+  management_meta: ManagementMeta;
+}
+
+/** Persist the latest management assessment onto the outcome row. */
+export async function updateManagement(
+  db: Db,
+  outcomeId: number,
+  fields: ManagementUpdate,
+): Promise<void> {
+  if (!db) return;
+  try {
+    await db.update(signalOutcomes).set(fields).where(eq(signalOutcomes.id, outcomeId));
+  } catch (err) {
+    logger.warn(`[db] updateManagement failed for #${outcomeId}: ${(err as Error).message}`);
+  }
+}
+
+export interface ManagementEventRow {
+  outcome_id: number;
+  symbol: string;
+  kind: string;
+  severity: ManagementSeverity;
+  trade_health: number | null;
+  current_confidence: number | null;
+  price: number | null;
+  pnl_pct: number | null;
+  suggested_stop: number | null;
+  details: unknown;
+}
+
+/** Append one management-event row (notified events + throttled heartbeats). */
+export async function recordManagementEvent(db: Db, row: ManagementEventRow): Promise<void> {
+  if (!db) return;
+  try {
+    await db.insert(tradeManagementEvents).values(row);
+  } catch (err) {
+    logger.warn(`[db] recordManagementEvent failed for outcome #${row.outcome_id}: ${(err as Error).message}`);
+  }
+}
+
+/** Refresh a tracked position's SL/TP from the exchange (user moved them on Bybit). */
+export async function updateOutcomeLevels(
+  db: Db,
+  outcomeId: number,
+  levels: { sl?: number; tp?: number },
+): Promise<void> {
+  if (!db) return;
+  try {
+    await db.update(signalOutcomes).set(levels).where(eq(signalOutcomes.id, outcomeId));
+  } catch (err) {
+    logger.warn(`[db] updateOutcomeLevels failed for #${outcomeId}: ${(err as Error).message}`);
+  }
+}
+
 // ── Historical metrics ──────────────────────────────────────────────────────
 
 export interface HistoricalMetrics {
@@ -800,6 +925,13 @@ export async function runRetentionCleanup(db: Db, rules: Rules): Promise<void> {
       const cutoff = new Date(now.getTime() - edgeDays * 24 * 60 * 60 * 1000);
       await db.delete(signalEdgeUpdates).where(lt(signalEdgeUpdates.recorded_at, cutoff));
       logger.info(`[retention] Cleaned signal_edge_updates older than ${edgeDays} days`);
+    }
+
+    const mgmtDays = rules.retention?.management_events_days ?? 90;
+    if (mgmtDays > 0) {
+      const cutoff = new Date(now.getTime() - mgmtDays * 24 * 60 * 60 * 1000);
+      await db.delete(tradeManagementEvents).where(lt(tradeManagementEvents.recorded_at, cutoff));
+      logger.info(`[retention] Cleaned trade_management_events older than ${mgmtDays} days`);
     }
   } catch (err) {
     logger.error(`[retention] Database cleanup failed: ${(err as Error).message}`);

@@ -96,6 +96,12 @@ export interface Signal {
   };
 
   detected_at: number;
+
+  // ── Trade management (attached after gates pass, before alert) ────────────
+  /** Conditional exit plan (Base/Protection/Aggressive/Emergency). */
+  plan?: ManagementPlan;
+  /** Expected-path probabilities at detection time. */
+  paths?: PathProbabilities;
 }
 
 // ── Expected-path chart overlay ────────────────────────────────────────────
@@ -203,6 +209,117 @@ export interface SignalUpdate {
   original: { confidence: number; funding_percentile: number; oi_zscore: number };
   live: { confidence: number; funding_percentile: number; oi_zscore: number };
   reasons: string[];
+}
+
+// ── Trade management ──────────────────────────────────────────────────────────
+// Active-trade management layer, orthogonal to both price `status` and `edge_state`.
+// Maps onto the user-facing lifecycle: PENDING (=PENDING_ENTRY) → FILLED/ACTIVE
+// (=ACTIVE) → MANAGED (=ACTIVE + management_state MANAGED) → EXITED (terminal status).
+// The manager only ever SUGGESTS actions — the bot stays read-only on the exchange.
+
+/** NONE = not yet picked up · MONITORING = scanned every minute, nothing to do yet ·
+ *  MANAGED = at least one management action has been suggested for this trade. */
+export type ManagementState = "NONE" | "MONITORING" | "MANAGED";
+
+export type HealthBand = "excellent" | "healthy" | "neutral" | "weak" | "exit_candidate";
+
+export interface HealthComponents {
+  structure: number; // 0-100
+  momentum: number;
+  volume: number;
+  trend_alignment: number;
+  risk_protection: number;
+}
+
+export interface TradeHealth {
+  total: number; // 0-100, weighted blend of components
+  band: HealthBand;
+  components: HealthComponents;
+}
+
+/** Classification bands for the trade health total. */
+export function healthBand(total: number): HealthBand {
+  if (total >= 85) return "excellent";
+  if (total >= 70) return "healthy";
+  if (total >= 55) return "neutral";
+  if (total >= 40) return "weak";
+  return "exit_candidate";
+}
+
+/** Expected-path split — integers that sum to 100. */
+export interface PathProbabilities {
+  tp_direct: number; // Path A: TP hit directly
+  retest_then_tp: number; // Path B: retest entry/support, then TP
+  sl_hit: number; // Path C: SL hit
+}
+
+/** Trailing-stop family, chosen per regime (see management/stops.ts). */
+export type StopMethod = "swing" | "atr" | "ema" | "structure";
+
+export interface StopSuggestion {
+  price: number;
+  method: StopMethod;
+  reasons: string[];
+  /** Risk removed vs the current stop, in R of the initial risk (0 when no prior stop). */
+  improves_r: number;
+}
+
+/** One conditional rule of the management plan ("If X → do Y"). */
+export interface PlanRule {
+  trigger: string;
+  action: string;
+}
+
+export interface ManagementPlan {
+  base: { entry_low: number; entry_high: number; sl: number; tp: number };
+  protection: PlanRule[];
+  aggressive: PlanRule[];
+  emergency: PlanRule[];
+  /** Regime-chosen trailing method for the runner. */
+  trail_method: StopMethod;
+}
+
+export type ManagementEventKind =
+  | "rejection_risk"
+  | "momentum_decay"
+  | "liquidity_sweep"
+  | "stop_hunt"
+  | "breakout_trap"
+  | "health_drop"
+  | "stop_suggestion"
+  | "thesis_invalidated"
+  | "emergency_exit"
+  | "health_snapshot"; // throttled history heartbeat, never notified
+
+export type ManagementSeverity = "info" | "warning" | "critical";
+
+/** An action-oriented management event: what happened / why it matters / what to do. */
+export interface ManagementEvent {
+  kind: ManagementEventKind;
+  severity: ManagementSeverity;
+  title: string;
+  happened: string[];
+  matters: string;
+  actions: string[];
+}
+
+/** Full per-minute assessment of one active trade. */
+export interface TradeAssessment {
+  symbol: string;
+  direction: Direction;
+  price: number;
+  pnlPct: number;
+  pnlR: number | null; // null when initial risk is unknown (e.g. Bybit position without SL)
+  health: TradeHealth;
+  entryConfidence: number | null;
+  currentConfidence: number | null; // edge monitor's live confidence (signal trades only)
+  observations: string[]; // ✓ lines
+  warnings: string[]; // ⚠ lines
+  actions: string[]; // ordered suggested actions
+  events: ManagementEvent[]; // newly detected this pass (pre-throttle)
+  stop: StopSuggestion | null;
+  paths: PathProbabilities | null;
+  emergency: string[]; // live "exit immediately if" conditions
 }
 
 // ── Outcome tracking ─────────────────────────────────────────────────────────

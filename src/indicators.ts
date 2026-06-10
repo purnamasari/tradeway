@@ -113,6 +113,43 @@ export function adx(candles: Candle[], period = 14): number {
   return adxVal;
 }
 
+/** Wilder RSI for each index (NaN until `period` values exist). */
+export function rsiSeries(closes: number[], period = 14): number[] {
+  const out: number[] = new Array(closes.length).fill(NaN);
+  if (closes.length <= period) return out;
+  let gain = 0;
+  let loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i]! - closes[i - 1]!;
+    if (d >= 0) gain += d;
+    else loss -= d;
+  }
+  let avgGain = gain / period;
+  let avgLoss = loss / period;
+  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i]! - closes[i - 1]!;
+    avgGain = (avgGain * (period - 1) + Math.max(0, d)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(0, -d)) / period;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return out;
+}
+
+/** MACD histogram (macd line − signal line) for each index. */
+export function macdHistogramSeries(
+  closes: number[],
+  fast = 12,
+  slow = 26,
+  signal = 9,
+): number[] {
+  const f = emaSeries(closes, fast);
+  const s = emaSeries(closes, slow);
+  const macd = closes.map((_, i) => f[i]! - s[i]!);
+  const sig = emaSeries(macd, signal);
+  return macd.map((m, i) => m - sig[i]!);
+}
+
 /** Percentile rank (0-100) of `value` within `window`. */
 export function percentileRank(value: number, window: number[]): number {
   const clean = window.filter((v) => Number.isFinite(v));

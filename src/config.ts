@@ -91,6 +91,45 @@ export interface Rules {
     edge_history_min_delta: number; // append history row when live conf moves >= this
     edge_history_min_interval_min: number; // ...or at least this often (heartbeat)
   };
+  management: {
+    enabled: boolean; // master switch for the 1-minute trade manager
+    // Plan triggers (R multiples of the initial risk).
+    breakeven_at_r: number; // at +this R → suggest SL to breakeven
+    lock_at_r: number; // at +this R → suggest locking partial profit
+    lock_fraction: number; // fraction of position to lock at lock_at_r (0-1)
+    resistance_partial_fraction: number; // partial to take when volume weakens near TP/level (0-1)
+    // Rejection detection (1m candles).
+    rejection_window: number; // 1m candles inspected
+    rejection_wicks_min: number; // rejection wicks within window => signal
+    rejection_wick_body: number; // wick >= this × body to count as a rejection wick
+    volume_decline_pct: number; // directional volume down >= this % half-over-half => declining
+    body_weakening_pct: number; // avg candle body shrink >= this % => weakening
+    // Momentum decay (15m candles).
+    decay_vol_contraction: number; // recent/prior volume ratio below this => contraction
+    decay_atr_contraction: number; // ATR now / lookback-ago below this => contraction
+    decay_adx_drop: number; // ADX points lost vs lookback => decline
+    decay_lookback: number; // 15m bars for ATR/ADX comparisons
+    // Adaptive stop suggestions.
+    trail_atr_mult: number; // ATR trailing distance multiplier
+    trail_ema_period: number; // EMA period for EMA trailing (15m)
+    stop_buffer_pct: number; // buffer beyond structure/swing levels (% of price)
+    min_stop_improve_r: number; // suggest only if it removes >= this fraction of initial risk
+    // Trade health weights (must sum to 100).
+    health_weights: {
+      structure: number;
+      momentum: number;
+      volume: number;
+      trend_alignment: number;
+      risk_protection: number;
+    };
+    // Alerting & persistence throttles.
+    health_alert_drop: number; // notify when health falls >= this since last alert
+    update_min_interval_min: number; // min minutes between routine in-place report edits
+    event_cooldown_min: number; // per event-kind cooldown for warning alerts
+    emergency_confidence_floor: number; // live confidence below this => emergency exit condition
+    history_min_interval_min: number; // append health history row at least this often
+    history_min_health_delta: number; // ...or when health moved >= this
+  };
   analytics: {
     default_window_days: number; // CLI/HTTP default window (0 = all-time)
     digest_every_hours: number; // scheduled Telegram digest cadence; 0 disables
@@ -100,6 +139,7 @@ export interface Rules {
     metric_history_days: number;
     regime_log_days: number;
     edge_updates_days: number;
+    management_events_days: number;
   };
   backfill: {
     funding_days: number;
@@ -145,6 +185,41 @@ const RETENTION_DEFAULTS: Rules["retention"] = {
   metric_history_days: 180,
   regime_log_days: 90,
   edge_updates_days: 90,
+  management_events_days: 90,
+};
+
+const MANAGEMENT_DEFAULTS: Rules["management"] = {
+  enabled: true,
+  breakeven_at_r: 1.0,
+  lock_at_r: 1.5,
+  lock_fraction: 0.3,
+  resistance_partial_fraction: 0.25,
+  rejection_window: 10,
+  rejection_wicks_min: 3,
+  rejection_wick_body: 1.5,
+  volume_decline_pct: 30,
+  body_weakening_pct: 40,
+  decay_vol_contraction: 0.7,
+  decay_atr_contraction: 0.8,
+  decay_adx_drop: 5,
+  decay_lookback: 10,
+  trail_atr_mult: 2.0,
+  trail_ema_period: 21,
+  stop_buffer_pct: 0.15,
+  min_stop_improve_r: 0.1,
+  health_weights: {
+    structure: 25,
+    momentum: 25,
+    volume: 15,
+    trend_alignment: 15,
+    risk_protection: 20,
+  },
+  health_alert_drop: 15,
+  update_min_interval_min: 10,
+  event_cooldown_min: 45,
+  emergency_confidence_floor: 45,
+  history_min_interval_min: 10,
+  history_min_health_delta: 5,
 };
 
 const ANALYTICS_DEFAULTS: Rules["analytics"] = {
@@ -185,6 +260,14 @@ export function loadRules(): Rules {
   rules.risk = { ...RISK_DEFAULTS, ...(rules.risk ?? {}) };
   rules.momentum = { ...MOMENTUM_DEFAULTS, ...(rules.momentum ?? {}) };
   rules.squeeze = { ...SQUEEZE_DEFAULTS, ...(rules.squeeze ?? {}) };
+  rules.management = {
+    ...MANAGEMENT_DEFAULTS,
+    ...(rules.management ?? {}),
+    health_weights: {
+      ...MANAGEMENT_DEFAULTS.health_weights,
+      ...(rules.management?.health_weights ?? {}),
+    },
+  };
   return rules;
 }
 

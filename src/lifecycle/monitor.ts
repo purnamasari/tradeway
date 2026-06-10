@@ -28,6 +28,10 @@ export interface EdgeMonitorDeps {
   rules: Rules;
   env: Env;
   notifier: Notifier;
+  /** When the trade manager is enabled it owns all messaging for FILLED (ACTIVE)
+   *  trades — its report embeds the live edge state, so the edge monitor stays
+   *  quiet for those rows (it still persists live values and history). */
+  quietActiveMessaging?: boolean;
 }
 
 export async function monitorEdges(deps: EdgeMonitorDeps): Promise<void> {
@@ -142,8 +146,12 @@ async function evaluateOutcomeEdge(
     now.getTime() - new Date(o.last_update_sent_at).getTime() >= lc.update_min_interval_min * 60_000;
   const wasInvalidated = o.edge_state === "INVALIDATED";
   // State changes always notify; otherwise a significant confidence move (but not
-  // once already INVALIDATED — stay quiet until it changes state again).
-  const shouldNotify = stateChanged || (!wasInvalidated && confMoved && intervalOk);
+  // once already INVALIDATED — stay quiet until it changes state again). Filled
+  // trades are the manager's to message when it is running: it renders edge state
+  // in its report and raises INVALIDATED as a critical event itself.
+  const managerOwnsMessaging = deps.quietActiveMessaging === true && o.status === "ACTIVE";
+  const shouldNotify =
+    !managerOwnsMessaging && (stateChanged || (!wasInvalidated && confMoved && intervalOk));
 
   // ── Persist live edge (+ conditional bookkeeping) ────────────────────────────
   const fields: LiveEdgeUpdate = {
