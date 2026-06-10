@@ -16,7 +16,12 @@ import {
   formatAlert,
   formatManagementEvent,
   formatTradeReport,
-  formatRecent,
+  formatTradeView,
+  formatRecentRoot,
+  formatRecentList,
+  formatRecentTrade,
+  formatRecentPerformance,
+  coinName,
   splitCaption,
   clampMessage,
   TG_CAPTION_LIMIT,
@@ -347,25 +352,107 @@ async function main() {
     gatedReply.chart == null ? "no chart buffer" : `${gatedReply.chart.byteLength} bytes`,
   );
 
-  console.log("\n── /recent evaluation view ────────────────────────────────");
+  console.log("\n── /recent evaluation card ────────────────────────────────");
   const closedRow = (over: Partial<OutcomeRow>): OutcomeRow =>
     ({
-      symbol: "ZECUSDT", direction: "long", strategy: "momentum", source: "signal",
+      id: 1, symbol: "ZECUSDT", direction: "long", strategy: "momentum", source: "signal",
       entry_price: 100, hit_price: 105, status: "TP_HIT", duration_ms: 3_600_000,
       ...over,
     }) as unknown as OutcomeRow;
-  const recent = formatRecent([
-    closedRow({ sl: 98 }),
-    closedRow({ status: "SL_HIT", hit_price: 97, direction: "long", strategy: "trend_pullback" }),
-    closedRow({ status: "CLOSED", source: "bybit", strategy: "manual", direction: "short", hit_price: 98 }),
-  ]);
-  expect("recent header counts wins/losses", recent.includes("2W/1L"), recent.split("\n")[0]);
-  expect("recent shows realized PnL", recent.includes("+5.00%") && recent.includes("-3.00%"));
-  expect("recent shows R-multiple when SL known", recent.includes("(+2.5R)"), recent);
-  expect("recent header sums net R", recent.includes("net +2.5R"), recent.split("\n")[0]);
-  expect("recent empty state", formatRecent([]) === "📒 No closed trades yet.");
+  // Newest first, like fetchRecentClosedOutcomes returns them.
+  const recentRows = [
+    closedRow({ id: 11, sl: 98 }), // +5% = +2.5R win
+    closedRow({ id: 12, status: "SL_HIT", hit_price: 97, sl: 97, strategy: "trend_pullback" }), // −3% = −1R loss
+    closedRow({
+      id: 13, status: "CLOSED", source: "bybit", strategy: "manual", direction: "short",
+      hit_price: 98, sl: 0, original_factors: { size: 2 }, duration_ms: 2_040_000,
+    }), // +2% short, $4, no SL → no R
+  ];
+
+  const root = formatRecentRoot(recentRows);
+  expect("root shows newest-first streak", root.includes("Current Streak:") && root.includes("\uD83D\uDFE2\uD83D\uDD34\uD83D\uDFE2"), root);
+  expect("root sums net R over R-known trades", root.includes("Net:") && root.includes("+1.5R") && root.includes("\uD83D\uDFE2"), root);
+  expect("root computes WR without counts", root.includes("WR:") && root.includes("67%") && !root.includes("2W/1L"));
+  expect("root shows $ PnL when size known", root.includes("+$4.00"), root);
+  expect("root names best and worst (two-line)", root.includes("Best:") && root.includes("\uD83D\uDFE2 ZEC") && root.includes("+2.5R") && root.includes("Worst:") && root.includes("\uD83D\uDD34 ZEC") && root.includes("-1.0R"), root);
+  expect("root empty state", formatRecentRoot([]) === "\uD83D\uDCD2 No closed trades yet.");
+
+  const list = formatRecentList(recentRows);
+  expect("list numbers trades to match buttons", list.includes("1. \uD83D\uDFE2 ZEC LONG") && list.includes("+2.5R") && list.includes("2. \uD83D\uDD34 ZEC LONG") && list.includes("-1.0R"));
+  expect("list falls back to % when no R", list.includes("3. \uD83D\uDFE2 ZEC SHORT") && list.includes("+2.00%"), list);
+
+  const tradeCard = formatRecentTrade(recentRows[2]!);
+  expect("trade view shows $ result", tradeCard.includes("+$4.00"), tradeCard);
+  expect("trade view shows R when known", formatRecentTrade(recentRows[0]!).includes("+2.5R"));
+  expect("trade view shows duration", tradeCard.includes("Duration:") && tradeCard.includes("34m"), tradeCard);
+
+  const perf = formatRecentPerformance(recentRows);
+  expect("performance shows net R window label", perf.includes("Last 3:") && perf.includes("+1.5R"), perf);
+  expect("performance computes profit factor", perf.includes("Profit Factor:") && perf.includes("2.50"), perf);
+  expect("performance computes expectancy", perf.includes("Expectancy:") && perf.includes("+0.8R") && perf.includes("/ trade"), perf);
+  expect("performance shows avg win/loss labels", perf.includes("Avg Win:") && perf.includes("+2.5R") && perf.includes("Avg Loss:") && perf.includes("-1.0R"));
+  expect("coinName strips quote suffix", coinName("ZECUSDT") === "ZEC" && coinName("BTCPERP") === "BTC");
+
+  console.log("\n── interactive trade card views ───────────────────────────");
+  const cardRow = {
+    id: 32, symbol: "HYPEUSDT", direction: "short", strategy: "manual", source: "bybit",
+    status: "ACTIVE", management_state: "MANAGED",
+    entry_price: 55.701077, sl: 56.26, tp: 54.725,
+    trade_health: 62,
+    health_components: { structure: 65, momentum: 70, volume: 27, trend_alignment: 100, risk_protection: 48 },
+    suggested_stop: 56.1835, suggested_stop_method: "swing",
+    original_factors: { size: 6.04 },
+    path_probs: { tp_direct: 30, retest_then_tp: 50, sl_hit: 20 },
+    management_snapshot: {
+      observations: ["Structure intact", "Sellers defending resistance 55.68", "1h trend aligned"],
+      warnings: ["Momentum slowing (ADX falling (41→28))", "Support 55.56 nearby"],
+      actions: [
+        "Move SL to 56.1835 (lower high formed at 56.10, reduces risk)",
+        "Take 25% partial while price is rejected",
+        "Hold remaining position for TP 54.73",
+      ],
+      emergency: ["Structure breaks (15m close above 55.68)", "Volume spike buys into resistance"],
+      pnl_pct: 0.06, pnl_r: 0.06, price: 55.669, updated_at: new Date().toISOString(),
+    },
+  } as unknown as OutcomeRow;
+
+  const cardSummary = formatTradeView("summary", cardRow);
+  expect("summary leads with a verdict", cardSummary.startsWith("🟢 HOLD"), cardSummary.split("\n")[0]);
+  expect("summary shows PnL with $ amount", cardSummary.includes("PnL: +0.06% (+$0.20)"), cardSummary);
+  expect("summary falls back to health as confidence", cardSummary.includes("Confidence: 62%"));
+  expect("summary shows SL → suggested stop", cardSummary.includes("SL: 56.26 → 56.1835"));
+  expect("summary shows expected path", cardSummary.includes("🎯 TP Direct: 30%") && cardSummary.includes("❌ SL: 20%"));
+  expect("summary is a 5-second read (≤ 14 lines)", cardSummary.split("\n").length <= 14, `${cardSummary.split("\n").length} lines`);
+
+  const cardAction = formatTradeView("action", cardRow);
+  expect("action lists recommendations", cardAction.includes("Recommended:") && cardAction.includes("1. Move SL to 56.1835"));
+  expect("action lists exit conditions", cardAction.includes("Exit if:") && cardAction.includes("• Structure breaks"));
+
+  const cardAnalysis = formatTradeView("analysis", cardRow);
+  expect("analysis shows component scores", cardAnalysis.includes("Volume: 27") && cardAnalysis.includes("Trend: 100"));
+  expect("analysis shows observations & warnings", cardAnalysis.includes("✓ Structure intact") && cardAnalysis.includes("⚠ Momentum slowing"));
+
+  const cardRisk = formatTradeView("risk", cardRow);
+  expect("risk computes live RR", cardRisk.includes("Current RR: 1.6"), cardRisk);
+  expect("risk maps health band to level", cardRisk.includes("Risk: Medium") && cardRisk.includes("Trade Health: 62/100"));
+  expect("risk names the weakest factor", cardRisk.includes("Weakest factor: Volume (27)"));
+
+  const exitRow = { ...cardRow, trade_health: 30 } as unknown as OutcomeRow;
+  expect("low health verdict is EXIT", formatTradeView("summary", exitRow).startsWith("🔴 EXIT"));
+  const reduceRow = { ...cardRow, trade_health: 45 } as unknown as OutcomeRow;
+  expect("weak health verdict is REDUCE", formatTradeView("summary", reduceRow).startsWith("🟠 REDUCE"));
+  const noStopRow = { ...cardRow, sl: 0, suggested_stop: null } as unknown as OutcomeRow;
+  expect("missing stop flagged in risk view", formatTradeView("risk", noStopRow).includes("No stop set"));
 
   console.log("\n── formatted output samples ───────────────────────────────");
+  console.log("· Trade card (summary):\n");
+  console.log(cardSummary);
+  console.log("\n· Trade card (action):\n");
+  console.log(cardAction);
+  console.log("\n· Trade card (analysis):\n");
+  console.log(cardAnalysis);
+  console.log("\n· Trade card (risk):\n");
+  console.log(cardRisk);
   console.log("· Manual scan briefing:\n");
   console.log(briefing);
   console.log("\n· Signal alert with plan + paths:\n");
