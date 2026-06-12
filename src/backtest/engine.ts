@@ -19,6 +19,10 @@ import {
   fetchOIHistoryRange,
 } from "../data/bybit.js";
 import { simulateOutcome, type SimCosts, type SimStatus } from "./simulate.js";
+import { createH18Strategy, H18_CONTEXT_BARS } from "../strategies/h18.js";
+import { createPosition, evaluateBar, applyExitDecision } from "../engine/index.js";
+import type { Position, StrategyContext, Strategy } from "../engine/index.js";
+import { StrategyRegistry } from "../engine/strategy.js";
 
 export interface SymbolData {
   candles1m: Candle[];
@@ -30,7 +34,7 @@ export interface SymbolData {
 
 export interface BacktestTrade {
   symbol: string;
-  strategy: StrategyKind;
+  strategy: StrategyKind | string;
   direction: Direction;
   detectedAt: number; // ms
   confidence: number;
@@ -50,6 +54,7 @@ export interface ReplayOpts {
   minConfidence: number; // per-symbol gate
   stepMin: number;
   costs: SimCosts;
+  strategy?: string;
 }
 
 // ── Window helpers (binary search on sorted-asc arrays) ──────────────────────
@@ -108,9 +113,153 @@ function combined(s: Signal): number {
 
 // ── Per-symbol replay (pure — testable without network) ──────────────────────
 
-export function replaySymbol(symbol: string, data: SymbolData, opts: ReplayOpts): BacktestTrade[] {
+function getBacktestRegistry(rules: Rules): StrategyRegistry {
+  const registry = new StrategyRegistry();
+  registry.register(createH18Strategy(rules.regime));
+  return registry;
+}
+
+export function replayPluginSymbol(
+  symbol: string,
+  data: SymbolData,
+  strategy: Strategy,
+  opts: ReplayOpts
+): BacktestTrade[] {
   const trades: BacktestTrade[] = [];
-  const { rules, global, minConfidence, stepMin, costs } = opts;
+  const WARMUP = 2880;
+  const candles = data.candles15m;
+  
+  if (candles.length < WARMUP + 1) {
+    return trades;
+  }
+  
+  let pos: Position | null = null;
+  let seq = 0;
+  let initialStop = 0;
+  let entrySignalTime = 0;
+  let regimeVal = "trending";
+  let trendVal = "neutral";
+  
+  for (let i = WARMUP; i < candles.length; i++) {
+    const bar = candles[i]!;
+    const closeMs = (bar.time + 900) * 1000;
+    
+    const contextBars = strategy.id === "H18" ? H18_CONTEXT_BARS : (strategy.minBars + 512);
+    const sctx: StrategyContext = {
+      symbol,
+      closeTime: bar.time + 900,
+      price: bar.close,
+      candles15m: candles.slice(Math.max(0, i - (contextBars - 1)), i + 1),
+      candles1h: windowUpTo(data.candles1h, bar.time + 900, 120),
+      regime: null,
+      trend: null,
+      atr15: null,
+      atr1h: null,
+      fundingRate: null,
+      openInterest: null,
+      extras: {},
+    };
+    
+    if (pos) {
+      let p: Position = evaluateBar(pos, bar, closeMs).position;
+      const wasPending = pos.status === "PENDING_ENTRY";
+      
+      if (p.status === "OPEN" && wasPending) {
+        // filled!
+      }
+      
+      if (p.status === "OPEN") {
+        const nextState = strategy.updateState(sctx, p);
+        if (nextState !== p.state) p = { ...p, state: nextState };
+        p = applyExitDecision(p, strategy.evaluateExit(sctx, p), sctx.price, closeMs).position;
+      }
+      
+      if (p.status !== "OPEN" && p.status !== "PENDING_ENTRY") {
+        const filled = p.filledAt !== null;
+        let status: SimStatus = "NO_FILL";
+        let rMultiple = 0;
+        
+        if (filled) {
+          if (p.status === "EXITED_STOP") {
+            status = "SL";
+          } else if (p.status === "EXITED_TARGET") {
+            status = "TP";
+          } else if (p.status === "EXITED_TIME") {
+            status = "EXPIRED";
+          } else {
+            status = "EXPIRED";
+          }
+          
+          const risk = Math.abs(p.entryPrice - initialStop) || 1e-9;
+          const grossR = ((p.exitPrice! - p.entryPrice) / risk) * (p.side === "LONG" ? 1 : -1);
+          const costR = (p.entryPrice * ((opts.costs.feePct + 2 * opts.costs.slippagePct) / 100)) / risk;
+          rMultiple = grossR - costR;
+        } else {
+          status = "NO_FILL";
+        }
+        
+        trades.push({
+          symbol,
+          strategy: strategy.id,
+          direction: p.side === "LONG" ? "long" : "short",
+          detectedAt: entrySignalTime,
+          confidence: 100,
+          setup_quality: 100,
+          regime: regimeVal,
+          trend: trendVal,
+          rr: 0,
+          status,
+          filled,
+          rMultiple,
+          durationMs: p.closedAt && p.filledAt ? p.closedAt - p.filledAt : null,
+        });
+        
+        pos = null;
+      } else {
+        pos = p;
+      }
+    }
+    
+    if (!pos) {
+      const decision = strategy.evaluateEntry(sctx);
+      if (decision.enter) {
+        const risk = { approved: true, qty: 0, riskAmount: 0, model: "replay", reasons: [] };
+        pos = createPosition(decision.intent, risk, closeMs, `replay_${++seq}`);
+        initialStop = decision.intent.stopPrice;
+        entrySignalTime = closeMs;
+        
+        const c15 = sctx.candles15m;
+        const fullAtr = atrSeries(c15, opts.rules.regime.atr_period);
+        const atrHist = fullAtr.slice(-2880).filter(Number.isFinite);
+        regimeVal = classifyRegime(c15.slice(-320), opts.rules.regime, atrHist).regime;
+        
+        const slice1h = sctx.candles1h;
+        const closes1h = slice1h.map((c) => c.close);
+        const ema20 = ema(closes1h, opts.rules.regime.ema_fast);
+        const ema50 = ema(closes1h, opts.rules.regime.ema_slow);
+        trendVal = emaAdxTrendClassifier(slice1h, ema20, ema50).trend;
+      }
+    }
+  }
+  
+  return trades;
+}
+
+export function replaySymbol(symbol: string, data: SymbolData, opts: ReplayOpts): BacktestTrade[] {
+  const { rules } = opts;
+  
+  if (opts.strategy && opts.strategy !== "legacy") {
+    const registry = getBacktestRegistry(rules);
+    const strategy = registry.get(opts.strategy);
+    if (strategy) {
+      return replayPluginSymbol(symbol, data, strategy, opts);
+    } else {
+      throw new Error(`Strategy ${opts.strategy} not registered in backtest registry`);
+    }
+  }
+
+  const trades: BacktestTrade[] = [];
+  const { global, minConfidence, stepMin, costs } = opts;
   if (data.candles1m.length < 320 || data.candles15m.length < 70 || data.candles1h.length < 70) {
     return trades;
   }
@@ -221,6 +370,7 @@ export async function runBacktest(opts: BacktestOpts): Promise<BacktestTrade[]> 
       minConfidence,
       stepMin: opts.stepMin,
       costs: opts.costs,
+      strategy: opts.strategy,
     });
     opts.onProgress?.(symbol, trades.length);
     all.push(...trades);

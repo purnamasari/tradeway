@@ -26,6 +26,9 @@ async function main() {
   const feePct = Number(arg("fee_pct", "0.11"));
   const slippagePct = Number(arg("slippage_pct", "0.02"));
 
+  const strategy = arg("strategy", "legacy");
+  const warmupDays = strategy === "H18" ? 30 : 3;
+
   const enabled = watchlist.assets.filter((a) => a.enabled);
   const symList = (arg("symbols", "") || enabled.map((a) => a.symbol).join(",")).split(",").filter(Boolean);
   const symbols = symList.map((s) => {
@@ -34,9 +37,9 @@ async function main() {
   });
 
   const endMs = Date.now();
-  const startMs = endMs - (days + WARMUP_DAYS) * 86_400_000;
+  const startMs = endMs - (days + warmupDays) * 86_400_000;
 
-  logger.info(`[backtest] ${symList.join(",")} · ${days}d (+${WARMUP_DAYS}d warmup) · step ${stepMin}m · category=${env.bybitCategory}`);
+  logger.info(`[backtest] ${symList.join(",")} · ${days}d (+${warmupDays}d warmup) · step ${stepMin}m · category=${env.bybitCategory} · strategy=${strategy}`);
 
   const trades = await runBacktest({
     rules,
@@ -47,6 +50,7 @@ async function main() {
     endMs,
     stepMin,
     costs: { feePct, slippagePct },
+    strategy,
     onProgress: (sym, n) => logger.info(`[backtest] ${sym}: ${n} signals`),
   });
 

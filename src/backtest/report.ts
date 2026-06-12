@@ -85,7 +85,15 @@ export function formatBacktestReport(trades: BacktestTrade[], meta: ReportMeta):
   out.push(row("strategy", "sig", "fill%", "win%", "exp.R", "PF", "avg"));
   out.push("─".repeat(58));
   const overall = stats("OVERALL", trades);
-  for (const s of STRATEGIES) {
+  
+  const standardStrategies = ["momentum", "liquidity_sweep", "trend_pullback", "squeeze"];
+  const uniqueInTrades = [...new Set(trades.map((t) => t.strategy))];
+  const strategies = [
+    ...standardStrategies,
+    ...uniqueInTrades.filter((s) => !standardStrategies.includes(s)),
+  ];
+
+  for (const s of strategies) {
     const g = stats(s, trades.filter((t) => t.strategy === s));
     if (g.signals > 0) out.push(statRow(g));
   }
