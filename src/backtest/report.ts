@@ -8,6 +8,7 @@ export interface GroupStats {
   tp: number;
   sl: number;
   expired: number;
+  breakeven: number;
   winRatePct: number | null; // tp / (tp+sl)
   expectancyR: number | null; // mean realized R over filled trades
   profitFactor: number | null; // gross win R / gross loss R
@@ -18,9 +19,10 @@ export interface GroupStats {
 function stats(key: string, trades: BacktestTrade[]): GroupStats {
   const signals = trades.length;
   const filled = trades.filter((t) => t.filled);
-  const tp = filled.filter((t) => t.status === "TP").length;
-  const sl = filled.filter((t) => t.status === "SL").length;
+  const tp = filled.filter((t) => t.rMultiple > 0).length;
+  const sl = filled.filter((t) => t.rMultiple < 0).length;
   const expired = filled.filter((t) => t.status === "EXPIRED").length;
+  const breakeven = filled.filter((t) => t.rMultiple === 0).length;
   const resolved = tp + sl;
 
   const rs = filled.map((t) => t.rMultiple);
@@ -35,6 +37,7 @@ function stats(key: string, trades: BacktestTrade[]): GroupStats {
     tp,
     sl,
     expired,
+    breakeven,
     winRatePct: resolved === 0 ? null : Math.round((tp / resolved) * 1000) / 10,
     expectancyR: filled.length === 0 ? null : round2(rs.reduce((a, b) => a + b, 0) / filled.length),
     profitFactor: grossLoss === 0 ? (grossWin > 0 ? Infinity : null) : round2(grossWin / grossLoss),
