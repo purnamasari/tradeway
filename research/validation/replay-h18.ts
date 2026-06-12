@@ -14,6 +14,8 @@
 //     measures the hold from the fill bar's CLOSE; research from its OPEN).
 // Verdict thresholds below treat those as tolerated; everything else must
 // match exactly.
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { loadRules } from "../../src/config.js";
 import { loadSymbolCache } from "../harness.js";
 import { loadContexts } from "./fast-context.js";
@@ -128,6 +130,20 @@ const near = (a: number, b: number, relTol = 1e-9): boolean =>
   Math.abs(a - b) <= relTol * Math.max(1, Math.abs(a), Math.abs(b));
 
 function main() {
+  // The candle caches are gitignored build artifacts — fail with a recipe,
+  // not a stack trace, when they are missing (fresh checkout / VPS).
+  const missing = SYMBOLS.filter(
+    (s) => !existsSync(fileURLToPath(new URL(`../data/${PREFIX}${s}.json`, import.meta.url))),
+  );
+  if (missing.length) {
+    console.error(
+      `Missing research candle cache(s): ${missing.map((s) => `research/data/${PREFIX}${s}.json`).join(", ")}\n` +
+        `Build them first (downloads Binance Vision dumps, ~40MB/symbol):\n` +
+        `  ./research/fetch-replay-data.sh "${SYMBOLS.join(" ")}"`,
+    );
+    process.exit(1);
+  }
+
   const rules = loadRules();
   let pass = true;
 

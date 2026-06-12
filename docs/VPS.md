@@ -74,7 +74,19 @@ Pre-flight, in order:
 
 1. `pnpm db:push` (or the apply-columns script) succeeded.
 2. `pnpm verify:history` exits 0 for every symbol.
-3. `pnpm test:engine` and `pnpm test:h18:replay` pass on the box.
+3. `pnpm test:engine` passes.
+4. `pnpm test:h18:replay` passes. The replay compares the production strategy
+   against the research reference over 2023–2026 candle caches, which are
+   gitignored build artifacts — on a fresh checkout build them first:
+
+   ```sh
+   sudo apt install -y unzip       # once
+   chmod +x research/*.sh
+   ./research/fetch-replay-data.sh # BTCUSDT+ETHUSDT, ~80MB from data.binance.vision
+   ```
+
+   (Optional on the VPS — the replay is deterministic, so a pass on any
+   machine is equally valid; run it wherever bandwidth is cheapest.)
 
 Then in `config/rules.yaml`:
 
