@@ -5,3 +5,7 @@ dist/
 logs/
 .DS_Store
 test-chart.png
+research/data/
+research/binance-raw/
+research/out/
+research/output/

@@ -152,6 +152,18 @@ export interface Rules {
     min_volume: number;
     min_candles: number;
   };
+  // Strategy-agnostic execution engine (src/engine/, MIGRATION_PLAN.md).
+  // Runs alongside the legacy signal path; engine positions are source='engine'.
+  engine: {
+    enabled: boolean; // master flag — the engine cycle task runs only when true
+    strategies: string[]; // strategy ids to register (e.g. ["H18"]); [] = idle
+    risk_model: "advisory" | "fixed_fraction" | "fixed_notional" | "vol_target";
+    equity: number; // paper equity for sizing (quote currency)
+    risk_fraction: number; // fixed_fraction: equity fraction risked per trade
+    notional: number; // fixed_notional: quote amount per position
+    target_daily_vol: number; // vol_target: per-day vol contribution target
+    max_open_positions: number; // 0 = unlimited
+  };
 }
 
 function load<T>(file: string): T {
@@ -251,10 +263,22 @@ const SQUEEZE_DEFAULTS: Rules["squeeze"] = {
   oi_zscore_max: -1.0,
 };
 
+const ENGINE_DEFAULTS: Rules["engine"] = {
+  enabled: false,
+  strategies: [],
+  risk_model: "advisory",
+  equity: 10_000,
+  risk_fraction: 0.01,
+  notional: 1_000,
+  target_daily_vol: 0.01,
+  max_open_positions: 0,
+};
+
 export function loadRules(): Rules {
   const rules = load<Rules>("rules.yaml");
   // Backfill newer config blocks so a rules.yaml predating them still loads.
   rules.lifecycle = { ...LIFECYCLE_DEFAULTS, ...(rules.lifecycle ?? {}) };
+  rules.engine = { ...ENGINE_DEFAULTS, ...(rules.engine ?? {}) };
   rules.retention = { ...RETENTION_DEFAULTS, ...(rules.retention ?? {}) };
   rules.analytics = { ...ANALYTICS_DEFAULTS, ...(rules.analytics ?? {}) };
   rules.risk = { ...RISK_DEFAULTS, ...(rules.risk ?? {}) };

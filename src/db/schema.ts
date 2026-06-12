@@ -1,6 +1,6 @@
 // Drizzle schema — metric_history, signals, regime_log, signal_outcomes tables.
 // All persistence is optional; if DATABASE_URL is not set, these are never used.
-import { pgTable, serial, text, real, timestamp, jsonb, integer, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, real, doublePrecision, timestamp, jsonb, integer, bigint, boolean, index, uniqueIndex, primaryKey } from "drizzle-orm/pg-core";
 
 // ── market_history ────────────────────────────────────────────────────────────
 // Raw historical market data backfilled from Bybit (and the single source of
@@ -29,6 +29,27 @@ export const marketHistory = pgTable(
   (t) => [
     uniqueIndex("uq_market_symbol_time").on(t.symbol, t.timestamp),
   ],
+);
+
+// ── candles ───────────────────────────────────────────────────────────────────
+// Historical OHLCV store for the strategy engine (src/data/history/). One row
+// per (symbol, timeframe, open time); only CLOSED bars are written. Distinct
+// from market_history (legacy percentile windows): this table is the
+// MarketDataProvider's backing store and supports 15m/1h/4h/1d.
+// Composite PK = natural idempotency: re-running a backfill cannot duplicate.
+export const candlesTable = pgTable(
+  "candles",
+  {
+    symbol: text("symbol").notNull(),
+    timeframe: text("timeframe").notNull(), // '15m' | '1h' | '4h' | '1d'
+    time: bigint("time", { mode: "number" }).notNull(), // unix seconds, bar open
+    open: doublePrecision("open").notNull(),
+    high: doublePrecision("high").notNull(),
+    low: doublePrecision("low").notNull(),
+    close: doublePrecision("close").notNull(),
+    volume: doublePrecision("volume").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.symbol, t.timeframe, t.time] })],
 );
 
 // ── metric_history ──────────────────────────────────────────────────────────
@@ -176,6 +197,18 @@ export const signalOutcomes = pgTable(
     // Manager bookkeeping (event cooldowns, last health band, throttle timestamps).
     // One JSONB blob: bookkeeping only, never queried.
     management_meta: jsonb("management_meta"),
+
+    // ── Strategy-agnostic engine (source='engine' rows; see MIGRATION_PLAN.md) ──
+    // Additive only — legacy rows leave them null. `tp = 0` is the existing
+    // "no target" sentinel (same convention as Bybit rows).
+    strategy_state: jsonb("strategy_state"), // opaque per-position strategy memory
+    entry_reasons: jsonb("entry_reasons"), // string[] — strategy-authored entry explanation
+    qty: real("qty"), // sized by the risk engine (0 = advisory)
+    risk_amount: real("risk_amount"), // quote at risk if the stop is hit
+    risk_model: text("risk_model"), // sizing model id
+    age_bars: integer("age_bars"), // closed bars since fill
+    exit_reason: text("exit_reason"), // engine exit reason (stop hit, trail, …)
+    max_hold_sec: integer("max_hold_sec"), // strategy holding horizon (s from fill)
   },
   (t) => [
     index("idx_outcome_status").on(t.status),

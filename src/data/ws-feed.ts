@@ -15,9 +15,12 @@ import { fetchCandles, fetchTicker, fetchFundingHistory, fetchOIHistory } from "
 import { applyKline, intervalsBehind, type KlineUpdate } from "./candle-buffer.js";
 import { logger } from "../logger.js";
 
-const BYBIT_INTERVAL: Record<Timeframe, string> = { "1m": "1", "15m": "15", "1h": "60" };
-const INTERVAL_TO_TF: Record<string, Timeframe> = { "1": "1m", "15": "15m", "60": "1h" };
-const INTERVAL_SEC: Record<Timeframe, number> = { "1m": 60, "15m": 900, "1h": 3_600 };
+/** The feed streams only the scanner timeframes — 4h/1d history is served by
+ *  the MarketDataProvider (DB + REST), never over the WebSocket. */
+type WsTimeframe = "1m" | "15m" | "1h";
+const BYBIT_INTERVAL: Record<WsTimeframe, string> = { "1m": "1", "15m": "15", "1h": "60" };
+const INTERVAL_TO_TF: Record<string, WsTimeframe> = { "1": "1m", "15": "15m", "60": "1h" };
+const INTERVAL_SEC: Record<WsTimeframe, number> = { "1m": 60, "15m": 900, "1h": 3_600 };
 
 const BUFFER_CAP = 250; // keep a little more than the 200 indicators need
 const SEED_LIMIT = 200;

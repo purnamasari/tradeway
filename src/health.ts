@@ -56,6 +56,15 @@ export function setAnalyticsProvider(fn: AnalyticsProvider): void {
   analyticsProvider = fn;
 }
 
+// Strategy-engine telemetry provider — registered when the engine is enabled,
+// surfaced under the `engine` key of GET /health. Null = engine disabled.
+type EngineStatsProvider = () => unknown;
+let engineStatsProvider: EngineStatsProvider | null = null;
+
+export function setEngineStatsProvider(fn: EngineStatsProvider): void {
+  engineStatsProvider = fn;
+}
+
 function entryFor(symbol: string): SymbolHealth {
   let e = symbolHealth.get(symbol);
   if (!e) {
@@ -140,6 +149,7 @@ function buildReport() {
       rss: Math.round(mem.rss / 1024 / 1024),
       heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
     },
+    engine: engineStatsProvider?.() ?? null,
     symbols,
     timestamp: new Date(now).toISOString(),
   };

@@ -45,8 +45,10 @@ export async function manageTrades(deps: TradeManagerDeps): Promise<void> {
 
   // Management starts at the fill: PENDING_ENTRY rows have no position to manage
   // (their plan was delivered with the alert), shadows are counterfactual-only.
+  // Engine positions (source='engine') are excluded: the strategy engine owns
+  // their stops/exits and messaging — double-managing would double-message.
   const outcomes = (await fetchOpenOutcomes(db, { followedOnly: true })).filter(
-    (o) => o.status === "ACTIVE",
+    (o) => o.status === "ACTIVE" && o.source !== "engine",
   );
   if (outcomes.length === 0) return;
 

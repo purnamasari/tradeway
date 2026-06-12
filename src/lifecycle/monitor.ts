@@ -42,8 +42,10 @@ export async function monitorEdges(deps: EdgeMonitorDeps): Promise<void> {
   // autodetected Bybit positions (source='bybit') have no bot thesis to validate —
   // their regime/strategy alignment is undefined ('manual'), so edge classification
   // would spuriously flag them. They are tracked for PnL only (see reconciler).
+  // Engine positions (source='engine') manage their own thesis inside the
+  // strategy plug-in — SMC edge scoring does not apply to them.
   const outcomes = (await fetchOpenOutcomes(db, { followedOnly: true })).filter(
-    (o) => o.source !== "bybit",
+    (o) => o.source !== "bybit" && o.source !== "engine",
   );
   if (outcomes.length === 0) return;
 

@@ -9,8 +9,18 @@ export interface Candle {
   volume: number;
 }
 
-// Timeframe stack (daytrade): 1m = entry trigger, 15m = structure/regime, 1h = bias.
-export type Timeframe = "1m" | "15m" | "1h";
+// Timeframe stack: 1m = entry trigger, 15m = structure/regime, 1h = bias,
+// 4h/1d = higher-timeframe history for the strategy engine.
+export type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d";
+
+/** Bar length in seconds per timeframe. */
+export const TIMEFRAME_SEC: Record<Timeframe, number> = {
+  "1m": 60,
+  "15m": 900,
+  "1h": 3_600,
+  "4h": 14_400,
+  "1d": 86_400,
+};
 
 // ── Regime engine ─────────────────────────────────────────────────────────────
 export type Regime = "trending" | "ranging" | "high_volatility" | "low_volatility";

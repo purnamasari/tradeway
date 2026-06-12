@@ -29,8 +29,12 @@ export async function evaluateOutcomes(
 
   // Autodetected real positions (source='bybit') are exited by the position
   // reconciler when they disappear from the exchange — never by our synthetic
-  // TP/SL/expiry. Exclude them here so we don't force-close a live position.
-  const outcomes = (await fetchOpenOutcomes(db)).filter((o) => o.source !== "bybit");
+  // TP/SL/expiry. Engine positions (source='engine') are owned by the strategy
+  // engine's bar-close cycle: they use tp=0 as a "no target" sentinel, which
+  // this tracker would misread as an instant TP for longs. Exclude both.
+  const outcomes = (await fetchOpenOutcomes(db)).filter(
+    (o) => o.source !== "bybit" && o.source !== "engine",
+  );
   if (outcomes.length === 0) return;
 
   // Batch price lookups — one per unique symbol.

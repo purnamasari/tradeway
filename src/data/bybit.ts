@@ -9,6 +9,8 @@ const INTERVAL: Record<Timeframe, string> = {
   "1m": "1",
   "15m": "15",
   "1h": "60",
+  "4h": "240",
+  "1d": "D",
 };
 
 interface BybitResponse<T> {

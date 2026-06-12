@@ -23,6 +23,24 @@ import {
 import { reconcilePositions } from "./positions/reconciler.js";
 import { runHistoricalBackfill, bootstrapHistoryIfNeeded } from "./backfill/history-backfill.js";
 import { evaluateOutcomes, type PriceFetcher } from "./outcome/outcome-tracker.js";
+import {
+  StrategyRegistry,
+  DbPositionStore,
+  CompositeNotificationEngine,
+  ConsoleNotificationEngine,
+  NotifierNotificationEngine,
+  createEngineRuntime,
+  runEngineCycle,
+  fixedFractionRisk,
+  fixedNotional,
+  volatilityTarget,
+  advisoryOnly,
+  getEngineTelemetry,
+  type RiskEngine,
+} from "./engine/index.js";
+import { createH18Strategy } from "./strategies/h18.js";
+import { CachingMarketDataProvider, HybridMarketDataProvider } from "./data/provider.js";
+import { setEngineStatsProvider } from "./health.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
 import { manageTrades } from "./management/manager.js";
 import { fetchTicker } from "./data/bybit.js";
@@ -347,6 +365,62 @@ async function main() {
           reconcilePositions({ db: database, creds, category, fetchPrice: priceFetcher, notifier }),
       });
     }
+    // Strategy-agnostic execution engine (Phases 2–4 — see MIGRATION_PLAN.md).
+    // Bar-close decision cycle for plug-in strategies; positions are
+    // source='engine' rows, fully separate from the legacy signal path.
+    // Candles come from the MarketDataProvider stack (DB depth via
+    // pnpm fetch:history + live tail top-up + per-bar memory cache).
+    if (rules.engine.enabled) {
+      const registry = new StrategyRegistry();
+      const available: Record<string, () => ReturnType<typeof createH18Strategy>> = {
+        H18: () => createH18Strategy(rules.regime),
+      };
+      for (const id of rules.engine.strategies) {
+        const factory = available[id];
+        if (factory) registry.register(factory());
+        else logger.warn(`[boot] engine: unknown strategy "${id}" in rules.engine.strategies — skipped`);
+      }
+      const riskModels: Record<string, () => RiskEngine> = {
+        advisory: () => advisoryOnly(),
+        fixed_fraction: () =>
+          fixedFractionRisk(rules.engine.risk_fraction, {
+            maxOpenPositions: rules.engine.max_open_positions || undefined,
+          }),
+        fixed_notional: () =>
+          fixedNotional(rules.engine.notional, {
+            maxOpenPositions: rules.engine.max_open_positions || undefined,
+          }),
+        vol_target: () =>
+          volatilityTarget(rules.engine.target_daily_vol, {
+            maxOpenPositions: rules.engine.max_open_positions || undefined,
+          }),
+      };
+      const engineDeps = {
+        store: new DbPositionStore(database),
+        registry,
+        risk: (riskModels[rules.engine.risk_model] ?? riskModels.advisory!)(),
+        notifications: new CompositeNotificationEngine([
+          new ConsoleNotificationEngine(),
+          new NotifierNotificationEngine(notifier),
+        ]),
+        data: new CachingMarketDataProvider(new HybridMarketDataProvider(database, env.bybitCategory)),
+        rules,
+        symbols: enabled.map((a) => a.symbol),
+        equity: rules.engine.equity,
+      };
+      const engineRuntime = createEngineRuntime();
+      setEngineStatsProvider(getEngineTelemetry);
+      logger.info(
+        `[boot] engine: enabled · risk=${engineDeps.risk.id} · strategies=[${registry.all().map((s) => s.id).join(",")}]` +
+          (registry.all().length === 0 ? " (none registered — cycle idles)" : ""),
+      );
+      tasks.push({
+        name: "engine",
+        everyMs: 60_000,
+        run: () => runEngineCycle(engineDeps, engineRuntime),
+      });
+    }
+
     tasks.push({
       name: "retention",
       everyMs: 24 * 60 * 60 * 1000,
