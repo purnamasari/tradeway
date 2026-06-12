@@ -148,10 +148,10 @@ backfill:
 # ranging; SMC trades ONLY ranging/high_volatility) and hold independent
 # (symbol, strategy) slots, so both can be enabled together.
 engine:
-  enabled: false
-  strategies: []            # e.g. [H18, SMC] — empty list = idle cycle
-  risk_model: advisory      # advisory | fixed_fraction | fixed_notional | vol_target
-  equity: 10000             # paper equity for sizing (quote currency)
+  enabled: true
+  strategies: [H18, SMC]            # e.g. [H18, SMC] — empty list = idle cycle
+  risk_model: fixed_fraction      # advisory | fixed_fraction | fixed_notional | vol_target
+  equity: 1000             # paper equity for sizing (quote currency)
   risk_fraction: 0.01       # fixed_fraction: equity fraction risked per trade
   notional: 1000            # fixed_notional: quote amount per position
   target_daily_vol: 0.01    # vol_target: per-day vol contribution target
