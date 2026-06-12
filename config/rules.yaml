@@ -142,11 +142,14 @@ backfill:
 
 # Strategy-agnostic execution engine (src/engine/ — MIGRATION_PLAN.md Phase 2).
 # Runs alongside the legacy signal path; engine positions are source='engine'.
-# No strategies are registered yet (SMC arrives in Phase 3, H18 in Phase 4),
-# so enabling it today only starts an idle bar-close cycle.
+# Available strategies: H18 (validated trend breakout — research/output/
+# H18_validation.md) and SMC (liquidity-sweep reversal scalp/daytrade —
+# research/output/SMC_validation.md). They are regime-complements (H18 skips
+# ranging; SMC trades ONLY ranging/high_volatility) and hold independent
+# (symbol, strategy) slots, so both can be enabled together.
 engine:
   enabled: false
-  strategies: []            # e.g. [H18] — empty list = idle cycle
+  strategies: []            # e.g. [H18, SMC] — empty list = idle cycle
   risk_model: advisory      # advisory | fixed_fraction | fixed_notional | vol_target
   equity: 10000             # paper equity for sizing (quote currency)
   risk_fraction: 0.01       # fixed_fraction: equity fraction risked per trade

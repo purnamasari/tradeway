@@ -3,6 +3,7 @@
 // and exits go through the trailing simulator with ZERO costs, storing gross
 // R + riskPct so any fee assumption can be applied afterwards.
 import { simulateTrailing } from "../trailing-sim.js";
+import { simulateManaged } from "./sim-managed.js";
 import type { FastContext } from "./fast-context.js";
 import { WARMUP_BARS } from "./fast-context.js";
 import type { ValTrade } from "./metrics.js";
@@ -17,6 +18,12 @@ export interface StratSignal {
   trail_dist: number;
   entry_ttl_ms: number;
   outcome_ttl_ms: number;
+  /** Fixed take-profit. When set the signal runs through the managed
+   *  simulator (TP + optional breakeven); otherwise the trailing simulator —
+   *  the validated H18 path is untouched. */
+  tp?: number;
+  /** Breakeven stop-move trigger in R (managed simulator only; 0 = off). */
+  be_trigger_r?: number;
 }
 
 export interface Strategy {
@@ -49,11 +56,15 @@ export function runStrategy(ctx: FastContext, strat: Strategy, bounds: RunBounds
     if (!sig) continue;
 
     const fwdBars = Math.ceil((sig.entry_ttl_ms + sig.outcome_ttl_ms) / 900_000) + 4;
-    const sim = simulateTrailing(
-      { ...sig, detected_at: closeTime * 1000 },
-      c.slice(i + 1, i + 1 + fwdBars),
-      NO_COSTS,
-    );
+    const forward = c.slice(i + 1, i + 1 + fwdBars);
+    const sim =
+      sig.tp != null
+        ? simulateManaged(
+            { ...sig, tp: sig.tp, be_trigger_r: sig.be_trigger_r ?? 0, detected_at: closeTime * 1000 },
+            forward,
+            NO_COSTS,
+          )
+        : simulateTrailing({ ...sig, detected_at: closeTime * 1000 }, forward, NO_COSTS);
     openUntil = sim.closedAt ?? closeTime + sig.entry_ttl_ms / 1000;
     if (!sim.filled) continue;
 

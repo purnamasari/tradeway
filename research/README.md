@@ -65,8 +65,17 @@ across all fee levels, sweep variants, and folds.
   drawdown (R units); net-R derivation per fee level; group-by helper
 - `fast-context.ts` — precomputed per-bar context (replicates harness exactly)
 - `strategy.ts` — generic parameterized-strategy runner (bar-close decisions,
-  one open trade per symbol, optional detection-time bounds for folds)
+  one open trade per symbol, optional detection-time bounds for folds);
+  signals with a `tp` run through `sim-managed.ts`, others through the
+  trailing simulator (H18 path untouched)
+- `sim-managed.ts` — managed-exit simulator: fixed TP + optional breakeven
+  move (close-based) + optional trail; same fill/pessimism conventions
 - `h18.ts` — H18 as a parameterized strategy; `H18_CANONICAL` is frozen
+- `smc.ts` — SMC as a parameterized strategy (detection shared with
+  production via `src/strategies/smc-core.ts`); `SMC_CANONICAL` is frozen
+- `probe-smc.ts` — SMC design-round audit trail (BTC+SOL only)
+- `validate-smc.ts` / `replay-smc.ts` — SMC validation suite and
+  production-vs-research replay parity test (`pnpm test:smc:replay`)
 - `fees.ts` — fee sensitivity over `[0.0010, 0.0015, 0.0020, 0.0025]`
 - `sweep.ts` — generic grid sweep; robustness score = positive/total variants,
   median expectancy; ranking is for inspection, not selection
@@ -120,3 +129,16 @@ everything else unchanged.
   Under the goal's stated metric (positive expectancy across market regimes)
   it passes decisively (t ≈ 5). Treat the 60%-months miss as the honest
   asterisk; do not size it as if it were a steady-PnL strategy.
+- **SMC — liquidity-sweep reversal (round 10, 2026-06-12)**: sweep of an
+  intact swing pool + first-close break of structure + displacement FVG
+  (≥ 0.75·ATR15) as the limit-entry zone; SL beyond sweep wick/order block,
+  TP at the nearest untapped opposing pool (≥1.5R, cap 3R), 48h cap, only in
+  ranging/high_volatility regimes — the regime complement of H18. Designed on
+  BTC+SOL (5 probe rounds; deep-retrace fills, market entries, breakeven
+  moves and long TTLs all measured harmful), validated on the pooled
+  41-month × 8-symbol set: **+0.318R net taker, n=139, PF 1.54, PASS on all
+  7 criteria** (3/3 walk-forward folds, 8/8 symbols, robustness 0.98,
+  symbol-OOS +0.266 on the 6 non-design symbols). Disclosed asterisk: the
+  regime gate was added post-hoc after pooled regime analytics (theory-
+  consistent, but not pre-registered); n=139 is modest, ~3.5 trades/month
+  portfolio-wide. See `output/SMC_validation.md`.

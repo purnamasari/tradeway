@@ -39,6 +39,7 @@ import {
   type RiskEngine,
 } from "./engine/index.js";
 import { createH18Strategy } from "./strategies/h18.js";
+import { createSmcStrategy } from "./strategies/smc.js";
 import { CachingMarketDataProvider, HybridMarketDataProvider } from "./data/provider.js";
 import { setEngineStatsProvider } from "./health.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
@@ -374,6 +375,7 @@ async function main() {
       const registry = new StrategyRegistry();
       const available: Record<string, () => ReturnType<typeof createH18Strategy>> = {
         H18: () => createH18Strategy(rules.regime),
+        SMC: () => createSmcStrategy(rules.regime),
       };
       for (const id of rules.engine.strategies) {
         const factory = available[id];

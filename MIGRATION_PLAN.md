@@ -144,9 +144,14 @@ that maps `NotificationEvent` → the current `Notifier` transport methods.
 ## Phases
 
 > **Status (2026-06-12):** Phases 1 ✅, 2 ✅, and 4 ✅ (H18Strategy) are
-> implemented; Phase 3 (SMCStrategy) is intentionally deferred — H18 went
-> first because it has a validated research reference and exercises the
-> trailing-stop machinery. Highlights:
+> implemented. Phase 3 as originally scoped (porting the LEGACY scanner
+> detectors into a plug-in) remains deferred; instead a NEW research-validated
+> SMC strategy landed (round 10): `src/strategies/smc.ts` + `smc-core.ts`
+> (detection shared with the research reference — entry parity by
+> construction), validated in research/output/SMC_validation.md (+0.318R net
+> taker, n=139, PASS all 7 criteria) and replay-tested via
+> `pnpm test:smc:replay`. It trades only ranging/high_volatility regimes —
+> the complement of H18's gate — so the two run together. Highlights:
 > - Historical data subsystem: `candles` table, `pnpm fetch:history` /
 >   `pnpm verify:history`, `MarketDataProvider` (DB + live top-up + cache).
 > - `src/strategies/h18.ts` — frozen canonical params; replay-validated
