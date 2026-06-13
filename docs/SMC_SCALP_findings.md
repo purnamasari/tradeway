@@ -79,11 +79,14 @@ timeframes where the move is large enough to pay the toll.
 
 ## Caveat on the P&L
 
-The plug-in backtest (`replayPluginSymbol`) resolves entry/stop/target on **15m
-bars**. For tight-stop strategies this manufactures artifacts (fill-and-stop in
-one bar), so `exp.R`/win%/PF for SMC_SCALP (and SMC) are **not trustworthy**
-until the backtest resolves fills on 1m bars (audit finding C2). The funnel
-(signal *frequency*) is unaffected and is the basis for this decision.
+At the time of this investigation the plug-in backtest (`replayPluginSymbol`)
+resolved entry/stop/target on **15m bars**, which manufactures artifacts for
+tight-stop strategies (fill-and-stop in one bar) — so the `exp.R`/win%/PF above
+were **not trustworthy**. **Update (2026-06-13): this was fixed** — the plug-in
+backtest now resolves fills/stops/targets on **1m bars** (audit finding C2
+closed), so P&L can be re-judged with a fresh run. The **decision below is
+unchanged**: it rests on the gate funnel (signal *frequency*), which is
+independent of the fill model.
 
 ## Decision
 

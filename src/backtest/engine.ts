@@ -132,22 +132,79 @@ export function replayPluginSymbol(
   const trades: BacktestTrade[] = [];
   const WARMUP = 2880;
   const candles = data.candles15m;
-  
+  const c1m = data.candles1m;
+  // 1m intrabar resolution when the minute series is present; otherwise fall
+  // back to 15m-bar resolution (coarser, but keeps the backtest working on a
+  // symbol/period that lacks a 1m series). Resolving fills/stops/targets on 1m
+  // bars — while strategy DECISIONS stay at 15m closes — mirrors the live
+  // engine (standing exits every tick, strategy logic at bar close) and fixes
+  // the same-15m-bar fill/stop ambiguity that distorted tight-stop strategies.
+  const use1m = c1m.length > 0;
+
   if (candles.length < WARMUP + 1) {
     return trades;
   }
-  
+
   let pos: Position | null = null;
   let seq = 0;
   let initialStop = 0;
   let entrySignalTime = 0;
   let regimeVal = "trending";
   let trendVal = "neutral";
-  
+
+  // Record a terminal position as a BacktestTrade. Shared by the 1m/15m
+  // resolution paths and the strategy-exit branch.
+  const recordTrade = (p: Position): void => {
+    const filled = p.filledAt !== null;
+    let status: SimStatus = "NO_FILL";
+    let rMultiple = 0;
+    if (filled) {
+      if (p.status === "EXITED_STOP") status = "SL";
+      else if (p.status === "EXITED_TARGET") status = "TP";
+      else status = "EXPIRED"; // EXITED_TIME / EXITED_STRATEGY
+      const risk = Math.abs(p.entryPrice - initialStop) || 1e-9;
+      const grossR = ((p.exitPrice! - p.entryPrice) / risk) * (p.side === "LONG" ? 1 : -1);
+      const costR = (p.entryPrice * ((opts.costs.feePct + 2 * opts.costs.slippagePct) / 100)) / risk;
+      rMultiple = grossR - costR;
+    }
+    trades.push({
+      symbol,
+      strategy: strategy.id,
+      direction: p.side === "LONG" ? "long" : "short",
+      detectedAt: entrySignalTime,
+      confidence: 100,
+      setup_quality: 100,
+      regime: regimeVal,
+      trend: trendVal,
+      rr: 0,
+      status,
+      filled,
+      rMultiple,
+      durationMs: p.closedAt && p.filledAt ? p.closedAt - p.filledAt : null,
+    });
+  };
+
+  // Walk the 1m bars in [fromSec, toSec) applying standing fill/stop/target/
+  // time exits at 1m resolution. Returns the surviving position, or null once
+  // it closes (the trade is recorded before returning). SL-first on ambiguous
+  // bars is enforced inside evaluateBar.
+  const resolveOver1m = (start: Position, fromSec: number, toSec: number): Position | null => {
+    let p = start;
+    for (let j = lastIdxLE(c1m, fromSec - 1) + 1; j < c1m.length && c1m[j]!.time < toSec; j++) {
+      const c = c1m[j]!;
+      p = evaluateBar(p, c, (c.time + 60) * 1000).position;
+      if (p.status !== "OPEN" && p.status !== "PENDING_ENTRY") {
+        recordTrade(p);
+        return null;
+      }
+    }
+    return p;
+  };
+
   for (let i = WARMUP; i < candles.length; i++) {
     const bar = candles[i]!;
     const closeMs = (bar.time + 900) * 1000;
-    
+
     const contextBars = strategy.minBars + 511;
     const sctx: StrategyContext = {
       symbol,
@@ -163,67 +220,33 @@ export function replayPluginSymbol(
       openInterest: null,
       extras: {},
     };
-    
+
     if (pos) {
-      let p: Position = evaluateBar(pos, bar, closeMs).position;
-      const wasPending = pos.status === "PENDING_ENTRY";
-      
-      if (p.status === "OPEN" && wasPending) {
-        // filled!
-      }
-      
-      if (p.status === "OPEN") {
-        const nextState = strategy.updateState(sctx, p);
-        if (nextState !== p.state) p = { ...p, state: nextState };
-        p = applyExitDecision(p, strategy.evaluateExit(sctx, p), sctx.price, closeMs).position;
-      }
-      
-      if (p.status !== "OPEN" && p.status !== "PENDING_ENTRY") {
-        const filled = p.filledAt !== null;
-        let status: SimStatus = "NO_FILL";
-        let rMultiple = 0;
-        
-        if (filled) {
-          if (p.status === "EXITED_STOP") {
-            status = "SL";
-          } else if (p.status === "EXITED_TARGET") {
-            status = "TP";
-          } else if (p.status === "EXITED_TIME") {
-            status = "EXPIRED";
-          } else {
-            status = "EXPIRED";
-          }
-          
-          const risk = Math.abs(p.entryPrice - initialStop) || 1e-9;
-          const grossR = ((p.exitPrice! - p.entryPrice) / risk) * (p.side === "LONG" ? 1 : -1);
-          const costR = (p.entryPrice * ((opts.costs.feePct + 2 * opts.costs.slippagePct) / 100)) / risk;
-          rMultiple = grossR - costR;
-        } else {
-          status = "NO_FILL";
-        }
-        
-        trades.push({
-          symbol,
-          strategy: strategy.id,
-          direction: p.side === "LONG" ? "long" : "short",
-          detectedAt: entrySignalTime,
-          confidence: 100,
-          setup_quality: 100,
-          regime: regimeVal,
-          trend: trendVal,
-          rr: 0,
-          status,
-          filled,
-          rMultiple,
-          durationMs: p.closedAt && p.filledAt ? p.closedAt - p.filledAt : null,
-        });
-        
-        pos = null;
+      // 1) Resolve standing exits over this 15m interval at 1m resolution
+      //    (or on the 15m bar itself when no 1m series is available).
+      if (use1m) {
+        pos = resolveOver1m(pos, bar.time, bar.time + 900);
       } else {
-        pos = p;
+        pos = evaluateBar(pos, bar, closeMs).position;
+        if (pos.status !== "OPEN" && pos.status !== "PENDING_ENTRY") {
+          recordTrade(pos);
+          pos = null;
+        }
+      }
+
+      // 2) If still open, let the strategy ratchet/exit at the 15m close
+      //    (trailing stops move once per decision bar, mirroring live).
+      if (pos && pos.status === "OPEN") {
+        const nextState = strategy.updateState(sctx, pos);
+        if (nextState !== pos.state) pos = { ...pos, state: nextState };
+        pos = applyExitDecision(pos, strategy.evaluateExit(sctx, pos), sctx.price, closeMs).position;
+        if (pos.status !== "OPEN" && pos.status !== "PENDING_ENTRY") {
+          recordTrade(pos);
+          pos = null;
+        }
       }
     }
-    
+
     if (!pos) {
       // Gate funnel (observability): record every evaluation and its outcome,
       // exactly as the live cycle does, so the backtest can answer "which gate
@@ -238,12 +261,12 @@ export function replayPluginSymbol(
         pos = createPosition(decision.intent, risk, closeMs, `replay_${++seq}`);
         initialStop = decision.intent.stopPrice;
         entrySignalTime = closeMs;
-        
+
         const c15 = sctx.candles15m;
         const fullAtr = atrSeries(c15, opts.rules.regime.atr_period);
         const atrHist = fullAtr.slice(-2880).filter(Number.isFinite);
         regimeVal = classifyRegime(c15.slice(-320), opts.rules.regime, atrHist).regime;
-        
+
         const slice1h = sctx.candles1h;
         const closes1h = slice1h.map((c) => c.close);
         const ema20 = ema(closes1h, opts.rules.regime.ema_fast);
@@ -252,7 +275,7 @@ export function replayPluginSymbol(
       }
     }
   }
-  
+
   return trades;
 }
 
