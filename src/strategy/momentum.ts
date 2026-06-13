@@ -1,11 +1,10 @@
 // Momentum / breakout detector.
-// Rides a fast directional move instead of fading it (the gap that left clean 2%
-// spikes undetected — they land in high_volatility where only the counter-trend
-// squeeze used to fire). Enters in the move's direction with an ATR-sized stop.
+// Rides a fast directional move instead of fading it. Enters in the move's
+// direction with an ATR-sized stop.
 //
 // Gating:
-//   regime must allow momentum (every live regime does — see regime/engine.ts)
-//   HTF guard: block only if the 1h trend is *strictly opposite* the move.
+//   regime must allow momentum (all live regimes — see regime/engine.ts)
+//   HTF guard: block only if the 15m trend is *strictly opposite* the move.
 import type {
   MarketContext,
   RegimeResult,
@@ -16,7 +15,7 @@ import type {
   Direction,
 } from "../types.js";
 import type { Rules } from "../config.js";
-import { atr, percentileRank } from "../indicators.js";
+import { atr, ema, percentileRank } from "../indicators.js";
 import { scoreSetupQuality } from "../scoring.js";
 import { widenStopToAtr } from "../risk.js";
 
@@ -75,28 +74,36 @@ export function detectMomentum(
     return { signal: null, reason: `volume ${volRatio.toFixed(2)}x < ${cfg.vol_mult}x avg` };
   }
 
-  // HTF guard: only block a move that fights a committed 1h trend.
-  if (direction === "long" && trend.trend === "bearish") {
-    return { signal: null, reason: "long blocked — 1h trend bearish" };
+  // ── HTF guard: use 15m trend for intraday responsiveness ────────────────────
+  const closes15m = ctx.candles15m.map((c) => c.close);
+  const ema20_15m = ema(closes15m, 20);
+  const ema50_15m = ema(closes15m, 50);
+  const trend15m: "bullish" | "bearish" | "neutral" =
+    ema20_15m > ema50_15m * 1.001 ? "bullish" :
+    ema20_15m < ema50_15m * 0.999 ? "bearish" : "neutral";
+
+  if (direction === "long" && trend15m === "bearish") {
+    return { signal: null, reason: "long blocked — 15m trend bearish" };
   }
-  if (direction === "short" && trend.trend === "bullish") {
-    return { signal: null, reason: "short blocked — 1h trend bullish" };
+  if (direction === "short" && trend15m === "bullish") {
+    return { signal: null, reason: "short blocked — 15m trend bullish" };
   }
 
   // ── Trade levels ────────────────────────────────────────────────────────────
   const entryRef = nowPrice;
-  const band = entryRef * 0.001;
+  const band = entryRef * 0.003; // 0.3% entry band for fast moves
   const entry_low = entryRef - band;
   const entry_high = entryRef + band;
   const entry = entryRef;
 
   // SL: the base of the move (window extreme), widened to ATR.
-  const structuralSL =
+  // Also consider 15m structure for a more robust stop.
+  const windowExtreme =
     direction === "long"
       ? Math.min(...window.map((c) => c.low))
       : Math.max(...window.map((c) => c.high));
   const atr15m = atr(ctx.candles15m, rules.regime.atr_period);
-  const sl = widenStopToAtr(entry, structuralSL, direction, atr15m, rules.risk);
+  const sl = widenStopToAtr(entry, windowExtreme, direction, atr15m, rules.risk);
   const risk = Math.abs(entry - sl);
 
   // TP: next S/R in direction (if at least 1R away), else an R-multiple target.
@@ -112,37 +119,39 @@ export function detectMomentum(
   const rr = risk === 0 ? 0 : reward / risk;
 
   // ── Confidence: momentum-specific (move magnitude + volume), NOT funding/OI ──
-  // A qualifying move starts at 60; magnitude and volume add up to 40 more. The
-  // funding/OI confidence model would score ~40 here and be gated out, so momentum
-  // needs its own — this is what lets real 2% spikes clear min_confidence.
+  // A qualifying move starts at 55; magnitude and volume add up to 45 more.
   const moveScore = clamp01((absMove - cfg.min_move_pct) / cfg.min_move_pct);
   const volScore = clamp01((volRatio - cfg.vol_mult) / cfg.vol_mult);
-  const confidence = Math.round(Math.min(100, 60 + moveScore * 25 + volScore * 15));
+  const confidence = Math.round(Math.min(100, 55 + moveScore * 30 + volScore * 15));
 
+  // ── Setup quality: momentum-specific scoring ────────────────────────────────
+  // Rewards velocity, volume, and 15m trend alignment instead of S/R levels.
   const htfAligned =
-    (direction === "long" && trend.trend === "bullish") ||
-    (direction === "short" && trend.trend === "bearish");
-  const prevCandle = c1m.at(-2) ?? last;
-  const { setup_quality, parts: qParts } = scoreSetupQuality(
-    {
-      srLevel: targetValid ? target : null,
-      triggerCandle: last,
-      prevCandle,
-      htfAligned,
-      candles15m: ctx.candles15m,
-    },
-    rules.setup_quality_weights,
-  );
+    (direction === "long" && trend15m === "bullish") ||
+    (direction === "short" && trend15m === "bearish");
+
+  // Velocity score: how clean is the move (monotonic = higher score).
+  const velocityScore = window.length >= 2 ? velocityClean(window, direction) : 0.5;
+
+  // Volume score: already confirmed by gate, but quality scales with strength.
+  const volQuality = clamp01((volRatio - cfg.vol_mult) / cfg.vol_mult);
+
+  // Combine: velocity (30%) + volume (30%) + HTF alignment (20%) + structure (20%).
+  const setup_quality = Math.round(Math.min(100,
+    velocityScore * 30 + volQuality * 30 + (htfAligned ? 20 : 0) + (targetValid ? 20 : 0)
+  ));
 
   // Surrogate confidence breakdown for the alert's explainability block.
-  const cParts: Pick<
-    ScoreBreakdown,
-    "funding_percentile" | "oi_zscore" | "volume_percentile" | "regime_alignment"
-  > = {
+  const cParts: ScoreBreakdown = {
     funding_percentile: 50,
     oi_zscore: 0,
     volume_percentile: Math.round(percentileRank(last.volume, window.map((c) => c.volume))),
     regime_alignment: 10,
+    sr_level_strength: targetValid ? (target?.strength ?? 0) : 0,
+    engulf_body_ratio: round(Math.abs(last.close - last.open) / (Math.abs(c1m.at(-2)!.close - c1m.at(-2)!.open) || 1e-9), 2),
+    htf_aligned: htfAligned,
+    structure_intact: velocityScore > 0.7,
+    sweep_wick_ratio: undefined,
   };
 
   const signal: Signal = {
@@ -156,7 +165,7 @@ export function detectMomentum(
     rr: round(rr, 2),
     confidence,
     setup_quality,
-    score_breakdown: { ...cParts, ...qParts },
+    score_breakdown: { ...cParts },
     regime: regime.regime,
     trend: trend.trend,
     trend_source: trend.source,
@@ -174,6 +183,17 @@ export function detectMomentum(
     signal,
     reason: `momentum ${direction} ${movePct.toFixed(2)}% move, vol ${volRatio.toFixed(2)}x`,
   };
+}
+
+/** How monotonic is the move: 1.0 = every candle in direction, 0.0 = mixed. */
+function velocityClean(candles: { close: number; open: number }[], direction: Direction): number {
+  if (candles.length < 2) return 0.5;
+  let aligned = 0;
+  for (const c of candles) {
+    if (direction === "long" && c.close >= c.open) aligned++;
+    else if (direction === "short" && c.close <= c.open) aligned++;
+  }
+  return aligned / candles.length;
 }
 
 function clamp01(n: number): number {
