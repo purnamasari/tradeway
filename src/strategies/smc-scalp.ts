@@ -10,7 +10,7 @@
 // gate-funnel investigation found no real scalp edge at 15m: the market-at-break
 // entry (entryStyle:1) gives dead RR (93% of full-confluence setups rejected at
 // the RR gate), and 15m bars can't supply or time scalp structures. Full
-// writeup + the B-vs-C decision: research/output/SMC_SCALP_findings.md.
+// writeup + the B-vs-C decision: docs/SMC_SCALP_findings.md.
 //
 // ⚠️ PARAMETERS ARE NOT YET VALIDATED. Unlike SMC_CANONICAL / H18_PARAMS (which
 // passed a research round), SMC_SCALP_PARAMS below are an engineering starting
