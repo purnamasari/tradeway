@@ -164,6 +164,7 @@ export async function scanSymbol(
   let threw = false;
   try {
     const ctx = await deps.getContext(asset.symbol, env.bybitCategory);
+    logger.info(`[scan:auto] ${asset.symbol}: starting scan (regime will follow) ctx.candles15m=${ctx.candles15m.length} candles1h=${ctx.candles1h.length}${opts.manual ? " (manual)" : ""}`);
     ctx.candles1w = db ? await fetchLastCandles(db, asset.symbol, "1w", 100) : [];
     if (ctx.candles15m.length < 60 || ctx.candles1h.length < 60) {
       logger.warn(`[scan] ${asset.symbol}: insufficient candle history, skipping`);
@@ -299,6 +300,7 @@ export async function scanSymbol(
       entries,
       `gate: ✅ passed → alert ${signal.direction} ${signal.strategy}`,
     );
+    logger.info(`[scan:auto] ${asset.symbol}: ${signal.strategy} ${signal.direction} conf=${signal.confidence} quality=${signal.setup_quality} rr=${signal.rr} — sending alert${opts.manual ? " (manual)" : ""}`);
 
     // ── Trade management plan + expected paths ────────────────────────────────
     // Attached to the signal itself so the alert shows the full battle plan and
