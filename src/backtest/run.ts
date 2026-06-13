@@ -3,8 +3,10 @@
 //   pnpm backtest -- --symbols=BTCUSDT,ETHUSDT --days=14 --step=5
 // Requires network access to Bybit public REST (runs on the VPS or locally).
 import { loadRules, loadWatchlist, loadEnv } from "../config.js";
-import { runBacktest } from "./engine.js";
+import { runBacktest, getBacktestRegistry } from "./engine.js";
 import { formatBacktestReport } from "./report.js";
+import { funnelSnapshot, renderFunnel } from "../engine/index.js";
+import { strategyPipelines } from "../engine/cycle.js";
 import { logger } from "../logger.js";
 
 try { process.loadEnvFile(new URL("../../.env", import.meta.url)); } catch {}
@@ -58,6 +60,14 @@ async function main() {
     console.log(JSON.stringify(trades, null, 2));
   } else {
     console.log("\n" + formatBacktestReport(trades, { windowDays: days, stepMin, symbols: symList, feePct, slippagePct }));
+    // Gate funnel — only engine strategies are staged; legacy detectors aren't.
+    if (strategy !== "legacy") {
+      const strat = getBacktestRegistry(rules).get(strategy);
+      if (strat) {
+        console.log("\n═══ Gate funnel (why setups were/weren't taken) ═══");
+        console.log(renderFunnel(funnelSnapshot({ [strat.id]: strat.stages })));
+      }
+    }
   }
   process.exit(0);
 }
