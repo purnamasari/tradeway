@@ -1,5 +1,5 @@
 // AI Trend Classifier — enhancement layer, NOT a hard dependency.
-// 3-tier: Gemini 2.5 Flash -> Flash-Lite -> EMA/ADX rule fallback.
+// 2-tier: OpenRouter (owl-alpha) -> EMA/ADX rule fallback.
 // The caller never knows which tier produced the result.
 import type { Candle, TrendResult } from "../types.js";
 import type { Cache } from "../cache.js";
@@ -24,30 +24,25 @@ export async function classifyTrend(
   const cached = await deps.cache.get(cacheKey);
   if (cached) return JSON.parse(cached) as TrendResult;
 
-  // ── Tiers 1 & 2: Gemini (only if configured) ────────────────────────────────
+  // ── Tier 1: OpenRouter (owl-alpha) ──────────────────────────────────────────
   if (deps.geminiApiKey) {
-    for (const [model, timeoutMs, ttl, source] of [
-      ["gemini-2.5-flash", deps.rules.flash_timeout_ms, 1800, "gemini_flash"],
-      ["gemini-2.5-flash-lite", deps.rules.flash_lite_timeout_ms, 900, "gemini_flash_lite"],
-    ] as const) {
-      try {
-        const result = await withTimeout(
-          callGemini(model, deps.geminiApiKey, symbol, candles1h, ema20, ema50),
-          timeoutMs,
-        );
-        if (result.confidence >= deps.rules.confidence_floor) {
-          const final: TrendResult = { ...result, source };
-          await deps.cache.setex(cacheKey, ttl, JSON.stringify(final));
-          return final;
-        }
-        logger.warn(`[trend] ${model} low confidence ${result.confidence} for ${symbol}`);
-      } catch (err) {
-        logger.warn(`[trend] ${model} failed for ${symbol}: ${(err as Error).message}`);
+    try {
+      const result = await withTimeout(
+        callOpenRouter(deps.geminiApiKey, symbol, candles1h, ema20, ema50),
+        deps.rules.flash_timeout_ms,
+      );
+      if (result.confidence >= deps.rules.confidence_floor) {
+        const final: TrendResult = { ...result, source: "openrouter_owl" };
+        await deps.cache.setex(cacheKey, 1800, JSON.stringify(final));
+        return final;
       }
+      logger.warn(`[trend] owl-alpha low confidence ${result.confidence} for ${symbol}`);
+    } catch (err) {
+      logger.warn(`[trend] owl-alpha failed for ${symbol}: ${(err as Error).message}`);
     }
   }
 
-  // ── Tier 3: EMA/ADX rule fallback ───────────────────────────────────────────
+  // ── Tier 2: EMA/ADX rule fallback ───────────────────────────────────────────
   const fallback = emaAdxTrendClassifier(candles1h, ema20, ema50);
   await deps.cache.setex(cacheKey, 600, JSON.stringify(fallback));
   return fallback;
@@ -75,22 +70,14 @@ export function emaAdxTrendClassifier(
   };
 }
 
-// ── Gemini call (lazy import so the dep is optional) ──────────────────────────
-async function callGemini(
-  model: string,
+// ── OpenRouter call (owl-alpha model) ─────────────────────────────────────────
+async function callOpenRouter(
   apiKey: string,
   symbol: string,
   candles1h: Candle[],
   ema20: number,
   ema50: number,
 ): Promise<TrendResult> {
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const m = genAI.getGenerativeModel({
-    model,
-    generationConfig: { responseMimeType: "application/json", temperature: 0.1, maxOutputTokens: 256 },
-  });
-
   const recent = candles1h.slice(-20).map((c) => ({
     o: c.open,
     h: c.high,
@@ -114,8 +101,30 @@ Do not use code fences.
 
 {"trend":"bullish|bearish|neutral","confidence":0-100,"reasoning":"one short sentence","key_levels":{"support":number,"resistance":number}}`;
 
-  const res = await m.generateContent(prompt);
-  const raw = res.response.text();
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://github.com/purnamasari/tradeway",
+      "X-Title": "Tradeway Signal Bot",
+    },
+    body: JSON.stringify({
+      model: "openrouter/owl-alpha",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1,
+      max_tokens: 256,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`OpenRouter HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+  }
+
+  const data = await res.json() as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const raw = data.choices?.[0]?.message?.content ?? "";
   const jsonText = extractJsonText(raw);
   const parsed = JSON.parse(jsonText) as {
     trend: TrendResult["trend"];
@@ -124,7 +133,6 @@ Do not use code fences.
     key_levels?: { support: number; resistance: number };
   };
 
-  // Validate the trend field
   const validTrends = new Set(["bullish", "bearish", "neutral"]);
   if (!validTrends.has(parsed.trend)) {
     throw new Error(`Invalid trend value: "${parsed.trend}"`);
@@ -133,13 +141,13 @@ Do not use code fences.
   return {
     trend: parsed.trend,
     confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
-    source: "gemini_flash",
+    source: "openrouter_owl",
     reasoning: parsed.reasoning,
     keyLevels: parsed.key_levels,
   };
 }
 
-// ── Extract JSON from potentially messy Gemini output ─────────────────────────
+// ── Extract JSON from potentially messy model output ──────────────────────────
 function extractJsonText(raw: string): string {
   const trimmed = raw.trim();
 
@@ -165,7 +173,6 @@ function extractJsonText(raw: string): string {
         return trimmed.slice(start, i + 1);
       }
     }
-    // Unclosed brace — still try the substring (JSON.parse will throw with a clearer error)
     return trimmed.slice(start);
   }
 

@@ -47,7 +47,7 @@ export type Trend = "bullish" | "bearish" | "neutral";
 export interface TrendResult {
   trend: Trend;
   confidence: number; // 0-100
-  source: "gemini_flash" | "gemini_flash_lite" | "ema_adx_fallback";
+  source: "gemini_flash" | "gemini_flash_lite" | "openrouter_owl" | "ema_adx_fallback";
   reasoning?: string;
   keyLevels?: { support: number; resistance: number };
 }
