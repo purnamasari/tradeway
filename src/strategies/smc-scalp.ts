@@ -6,6 +6,12 @@
 // TTL/hold. The net effect is many more, smaller, faster trades than SMC's
 // ~0.5-1/month swing cadence.
 //
+// ⚠️ PARKED — backtest-only, NOT in the live engine.strategies list. A 90d × 5
+// gate-funnel investigation found no real scalp edge at 15m: the market-at-break
+// entry (entryStyle:1) gives dead RR (93% of full-confluence setups rejected at
+// the RR gate), and 15m bars can't supply or time scalp structures. Full
+// writeup + the B-vs-C decision: docs/SMC_SCALP_findings.md.
+//
 // ⚠️ PARAMETERS ARE NOT YET VALIDATED. Unlike SMC_CANONICAL / H18_PARAMS (which
 // passed a research round), SMC_SCALP_PARAMS below are an engineering starting
 // point chosen by analogy, not by a probe/validation sweep. Treat live signals

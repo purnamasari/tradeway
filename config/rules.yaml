@@ -149,7 +149,7 @@ backfill:
 # (symbol, strategy) slots, so both can be enabled together.
 engine:
   enabled: true
-  strategies: [H18, SMC, SMC_SCALP] # SMC_SCALP = experimental scalp variant (UNVALIDATED — backtest before trusting). Empty list = idle cycle
+  strategies: [H18, SMC]            # SMC_SCALP parked backtest-only — no scalp edge at 15m, see docs/SMC_SCALP_findings.md. Empty list = idle cycle
   risk_model: fixed_fraction      # advisory | fixed_fraction | fixed_notional | vol_target
   equity: 1000             # paper equity for sizing (quote currency)
   risk_fraction: 0.01       # fixed_fraction: equity fraction risked per trade
