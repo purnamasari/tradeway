@@ -22,7 +22,7 @@ import { simulateOutcome, type SimCosts, type SimStatus } from "./simulate.js";
 import { createH18Strategy } from "../strategies/h18.js";
 import { createSmcStrategy } from "../strategies/smc.js";
 import { createSmcScalpStrategy } from "../strategies/smc-scalp.js";
-import { createPosition, evaluateBar, applyExitDecision } from "../engine/index.js";
+import { createPosition, evaluateBar, applyExitDecision, funnel } from "../engine/index.js";
 import type { Position, StrategyContext, Strategy } from "../engine/index.js";
 import { StrategyRegistry } from "../engine/strategy.js";
 
@@ -115,7 +115,7 @@ function combined(s: Signal): number {
 
 // ── Per-symbol replay (pure — testable without network) ──────────────────────
 
-function getBacktestRegistry(rules: Rules): StrategyRegistry {
+export function getBacktestRegistry(rules: Rules): StrategyRegistry {
   const registry = new StrategyRegistry();
   registry.register(createH18Strategy(rules.regime));
   registry.register(createSmcStrategy(rules.regime));
@@ -225,8 +225,15 @@ export function replayPluginSymbol(
     }
     
     if (!pos) {
+      // Gate funnel (observability): record every evaluation and its outcome,
+      // exactly as the live cycle does, so the backtest can answer "which gate
+      // is the bottleneck?" over the whole window.
+      funnel.evaluated(strategy.id);
       const decision = strategy.evaluateEntry(sctx);
-      if (decision.enter) {
+      if (!decision.enter) {
+        funnel.rejected(strategy.id, decision.stage);
+      } else {
+        funnel.signal(strategy.id);
         const risk = { approved: true, qty: 0, riskAmount: 0, model: "replay", reasons: [] };
         pos = createPosition(decision.intent, risk, closeMs, `replay_${++seq}`);
         initialStop = decision.intent.stopPrice;
@@ -365,6 +372,7 @@ export interface BacktestOpts extends Omit<ReplayOpts, "minConfidence"> {
 }
 
 export async function runBacktest(opts: BacktestOpts): Promise<BacktestTrade[]> {
+  funnel.reset(); // fresh gate-funnel counts for this run
   const all: BacktestTrade[] = [];
   for (const { symbol, minConfidence } of opts.symbols) {
     const data = await fetchSymbolData(symbol, opts.category, opts.startMs, opts.endMs);
