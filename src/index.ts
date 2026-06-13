@@ -47,6 +47,7 @@ import { CachingMarketDataProvider, HybridMarketDataProvider } from "./data/prov
 import { setEngineStatsProvider } from "./health.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
 import { manageTrades } from "./management/manager.js";
+import { configureSR } from "./strategy/sr-engine.js";
 import { fetchTicker } from "./data/bybit.js";
 import { MarketFeed } from "./data/ws-feed.js";
 import { startScheduler, type PeriodicTask } from "./queue/scheduler.js";
@@ -104,6 +105,7 @@ async function main() {
   const mockScenario = mock ? parseMockScenario() : "sweep";
   const watchlist = loadWatchlist();
   const rules = loadRules();
+  configureSR({ weeklyLookback: rules.backfill.sr.weekly_lookback });
   const env = loadEnv();
 
   // In mock mode, force rule-based fallback and skip external services:

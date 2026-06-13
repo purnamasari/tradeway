@@ -10,8 +10,9 @@ export interface Candle {
 }
 
 // Timeframe stack: 1m = entry trigger, 15m = structure/regime, 1h = bias,
-// 4h/1d = higher-timeframe history for the strategy engine.
-export type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d";
+// 4h/1d = higher-timeframe history for the strategy engine,
+// 1w = structural S/R tier, 1M = macro context (live-fetch only, not backfilled).
+export type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d" | "1w" | "1M";
 
 /** Bar length in seconds per timeframe. */
 export const TIMEFRAME_SEC: Record<Timeframe, number> = {
@@ -20,6 +21,11 @@ export const TIMEFRAME_SEC: Record<Timeframe, number> = {
   "1h": 3_600,
   "4h": 14_400,
   "1d": 86_400,
+  "1w": 604_800,
+  // NOTE: nominal 30d. Calendar months are 28-31d, so this value is approximate.
+  // It must NOT be used for "1M" gap detection or bar-count verification — "1M"
+  // is intentionally excluded from HISTORY_TIMEFRAMES (see data/history/backfill.ts).
+  "1M": 2_592_000,
 };
 
 // ── Regime engine ─────────────────────────────────────────────────────────────
@@ -58,6 +64,24 @@ export interface SRSnapshot {
   support: SRLevel | null;
   resistance: SRLevel | null;
   levels: SRLevel[];
+}
+
+/** S/R tier: scalp = short-horizon (15m/1h) levels, structural = HTF (weekly) levels. */
+export type SRTier = "scalp" | "structural";
+
+/** An SRLevel annotated with the tier it was detected on. */
+export interface TieredSRLevel extends SRLevel {
+  tier: SRTier;
+}
+
+/**
+ * Two-tier S/R view: nearest scalp (15m) and structural (weekly) levels kept
+ * separate, plus a `combined` list (every level from both tiers, tagged).
+ */
+export interface SRTierSnapshot {
+  scalp: SRSnapshot;
+  structural: SRSnapshot;
+  combined: TieredSRLevel[];
 }
 
 // ── Strategy / signals ────────────────────────────────────────────────────────
@@ -179,6 +203,7 @@ export interface MarketContext {
   candles1m: Candle[]; // entry trigger
   candles15m: Candle[]; // structure + regime
   candles1h: Candle[]; // higher-timeframe bias (trend classifier)
+  candles1w?: Candle[]; // weekly HTF for structural S/R (optional until backfilled)
   fundingRate: number | null;
   openInterest: number | null;
   fundingHistory: number[]; // recent funding rates for percentile

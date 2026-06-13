@@ -9,7 +9,9 @@ import { fetchCandlesRange } from "../bybit.js";
 import { candleBounds, fetchCandleTimes, findGaps, findMisaligned, upsertCandles, type GapRange } from "./repo.js";
 import { logger } from "../../logger.js";
 
-export const HISTORY_TIMEFRAMES: Timeframe[] = ["15m", "1h", "4h", "1d"];
+// "1M" is intentionally omitted: monthly bars lack a fixed second-stride, which
+// breaks TIMEFRAME_SEC-based gap detection / bar-count verification below.
+export const HISTORY_TIMEFRAMES: Timeframe[] = ["15m", "1h", "4h", "1d", "1w"];
 
 export interface BackfillOptions {
   /** Target history depth in days (head-fills if the DB has less). */

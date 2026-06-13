@@ -138,6 +138,8 @@ backfill:
   min_oi: 30
   min_volume: 50
   min_candles: 50
+  sr:
+    weekly_lookback: 2  # fractal lookback for the structural (weekly) S/R tier
 
 
 # Strategy-agnostic execution engine (src/engine/ — MIGRATION_PLAN.md Phase 2).

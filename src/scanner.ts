@@ -5,11 +5,11 @@
 import type { AssetConfig, GlobalConfig, Rules, Env } from "./config.js";
 import type { Cache } from "./cache.js";
 import type { Notifier, ScanReply } from "./notify.js";
-import type { MarketContext, Signal, RegimeResult, TrendResult, StrategyKind } from "./types.js";
+import type { MarketContext, Signal, RegimeResult, TrendResult, StrategyKind, SRTierSnapshot } from "./types.js";
 import type { Db } from "./db/index.js";
 import { classifyRegime } from "./regime/engine.js";
 import { classifyTrend } from "./ai/trend-classifier.js";
-import { buildSR } from "./strategy/sr-engine.js";
+import { buildSRMultiTier } from "./strategy/sr-engine.js";
 import { detectLiquiditySweep, type DetectResult } from "./strategy/liquidity-sweep.js";
 import { detectTrendPullback } from "./strategy/trend-pullback.js";
 import { detectSqueeze } from "./strategy/squeeze.js";
@@ -23,6 +23,7 @@ import {
   fetchOpenOutcomeForSymbol,
   setSignalAlertRef,
 } from "./db/accumulate.js";
+import { fetchLastCandles } from "./data/history/repo.js";
 import { ema, percentileRank } from "./indicators.js";
 import { buildManagementPlan } from "./management/plan.js";
 import { estimatePaths } from "./management/paths.js";
@@ -100,7 +101,7 @@ function buildBriefing(
   price: number,
   regime: RegimeResult,
   trend: TrendResult,
-  sr: ReturnType<typeof buildSR>,
+  sr: SRTierSnapshot,
   entries: DetectorEntry[],
   verdict: string,
 ): string {
@@ -115,10 +116,16 @@ function buildBriefing(
     `Regime: ${regime.regime} (ADX ${regime.adx} · ATR %ile ${regime.atrPercentile})`,
     `Trend 1h: ${trend.trend} ${trend.confidence}/100 (${trend.source})`,
   ];
-  const srParts: string[] = [];
-  if (sr.support) srParts.push(`support ${sr.support.price.toFixed(4).replace(/\.?0+$/, "")} (${sr.support.strength})`);
-  if (sr.resistance) srParts.push(`resistance ${sr.resistance.price.toFixed(4).replace(/\.?0+$/, "")} (${sr.resistance.strength})`);
-  if (srParts.length) lines.push(`Levels: ${srParts.join(" · ")}`);
+  // Scalp levels (15m)
+  const scalpParts: string[] = [];
+  if (sr.scalp.support) scalpParts.push(`support ${fmtPrice(sr.scalp.support.price)} (${sr.scalp.support.strength})`);
+  if (sr.scalp.resistance) scalpParts.push(`resistance ${fmtPrice(sr.scalp.resistance.price)} (${sr.scalp.resistance.strength})`);
+  if (scalpParts.length) lines.push(`Scalp: ${scalpParts.join(" · ")}`);
+  // Structural levels (weekly)
+  const structParts: string[] = [];
+  if (sr.structural.support) structParts.push(`sup ${fmtPrice(sr.structural.support.price)} (${sr.structural.support.strength})`);
+  if (sr.structural.resistance) structParts.push(`res ${fmtPrice(sr.structural.resistance.price)} (${sr.structural.resistance.strength})`);
+  if (structParts.length) lines.push(`Struct: ${structParts.join(" · ")}`);
 
   lines.push(``, `Detectors:`);
   for (const { strategy, result } of entries) {
@@ -157,6 +164,7 @@ export async function scanSymbol(
   let threw = false;
   try {
     const ctx = await deps.getContext(asset.symbol, env.bybitCategory);
+    ctx.candles1w = db ? await fetchLastCandles(db, asset.symbol, "1w", 100) : [];
     if (ctx.candles15m.length < 60 || ctx.candles1h.length < 60) {
       logger.warn(`[scan] ${asset.symbol}: insufficient candle history, skipping`);
       if (opts.manual) {
@@ -182,7 +190,7 @@ export async function scanSymbol(
     });
 
     const price = ctx.candles15m.at(-1)!.close;
-    const sr = buildSR(ctx.candles15m, price);
+    const sr = buildSRMultiTier(ctx.candles15m, ctx.candles1w ?? [], price);
 
     // ── Persist metrics & regime (no-op if db is null) ────────────────────────
     await recordMetrics(db, ctx, regime);
@@ -190,10 +198,10 @@ export async function scanSymbol(
 
     // ── Run all permitted detectors ──────────────────────────────────────────
     const entries: DetectorEntry[] = [
-      { strategy: "liquidity_sweep", result: detectLiquiditySweep(ctx, regime, trend, sr, rules) },
-      { strategy: "trend_pullback", result: detectTrendPullback(ctx, regime, trend, sr, rules) },
-      { strategy: "squeeze", result: detectSqueeze(ctx, regime, trend, sr, rules) },
-      { strategy: "momentum", result: detectMomentum(ctx, regime, trend, sr, rules) },
+      { strategy: "liquidity_sweep", result: detectLiquiditySweep(ctx, regime, trend, sr.scalp, rules) },
+      { strategy: "trend_pullback", result: detectTrendPullback(ctx, regime, trend, sr.scalp, rules) },
+      { strategy: "squeeze", result: detectSqueeze(ctx, regime, trend, sr.scalp, rules) },
+      { strategy: "momentum", result: detectMomentum(ctx, regime, trend, sr.scalp, rules) },
     ];
     const candidates = entries.map((e) => e.result.signal).filter((s): s is Signal => s !== null);
 
