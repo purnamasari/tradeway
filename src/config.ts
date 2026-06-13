@@ -304,6 +304,7 @@ export function loadRules(): Rules {
 }
 
 export interface Env {
+  openrouterApiKey?: string;
   geminiApiKey?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
@@ -327,6 +328,7 @@ export interface Env {
 
 export function loadEnv(): Env {
   return {
+    openrouterApiKey: process.env.OPENROUTER_API_KEY || undefined,
     geminiApiKey: process.env.GEMINI_API_KEY || undefined,
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: process.env.TELEGRAM_CHAT_ID || undefined,

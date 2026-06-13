@@ -186,7 +186,7 @@ export async function scanSymbol(
     const trend = await classifyTrend(asset.symbol, ctx.candles1h, ema20, ema50, {
       cache,
       rules: rules.trend,
-      geminiApiKey: env.geminiApiKey,
+      geminiApiKey: env.openrouterApiKey || env.geminiApiKey,
     });
 
     const price = ctx.candles15m.at(-1)!.close;
