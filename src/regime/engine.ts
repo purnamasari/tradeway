@@ -12,7 +12,7 @@ const ALLOWED: Record<RegimeResult["regime"], StrategyKind[]> = {
   trending: ["trend_pullback", "momentum"],
   ranging: ["liquidity_sweep", "momentum"],
   high_volatility: ["squeeze", "momentum"],
-  low_volatility: [],
+  low_volatility: ["momentum"],
 };
 
 export function classifyRegime(candles15m: Candle[], rules: Rules["regime"], atrHistory?: number[]): RegimeResult {

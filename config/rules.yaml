@@ -114,10 +114,10 @@ risk:
 # Momentum / breakout detector — rides a fast directional move instead of fading it.
 momentum:
   enabled: true
-  lookback_1m: 7           # window of 1m candles to measure the move
-  min_move_pct: 1.5        # |move| over the window to qualify (percent)
-  vol_mult: 1.2            # latest volume >= this * window-average volume
-  tp_r: 2.5                # take-profit R-multiple when no S/R target is in range
+  lookback_1m: 5           # window of 1m candles to measure the move
+  min_move_pct: 0.8         # |move| over the window to qualify (percent)
+  vol_mult: 1.5             # latest volume >= this * window-average volume
+  tp_r: 2.5                 # take-profit R-multiple when no S/R target is in range
   max_final_candle_frac: 0.7  # reject blow-off bars (>70% of the move in one candle)
 
 # One-time historical backfill from Bybit. Bootstraps percentile/z-score windows

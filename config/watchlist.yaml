@@ -1,7 +1,7 @@
 # config/watchlist.yaml — per-asset scanner config + asset class metadata.
 global:
-  min_confidence: 65
-  min_setup_quality: 60
+  min_confidence: 55
+  min_setup_quality: 50
   alert_cooldown_min: 30
   max_alerts_per_hour: 10
   min_rr: 2.0
