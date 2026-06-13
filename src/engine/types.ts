@@ -76,10 +76,12 @@ export interface EntryIntent {
 }
 
 export type EntryDecision =
-  | { enter: false; reason: string }
+  | { enter: false; reason: string; stage?: string }
   | { enter: true; intent: EntryIntent };
 
-export const noEntry = (reason: string): EntryDecision => ({ enter: false, reason });
+/** `stage` names the gate that rejected the setup (e.g. "regime", "fvg") for
+ *  the rejection log and the gate funnel. Optional — display/metrics only. */
+export const noEntry = (reason: string, stage?: string): EntryDecision => ({ enter: false, reason, stage });
 export const entry = (intent: EntryIntent): EntryDecision => ({ enter: true, intent });
 
 // ── Exit ──────────────────────────────────────────────────────────────────────

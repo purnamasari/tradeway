@@ -36,10 +36,13 @@ import {
   volatilityTarget,
   advisoryOnly,
   getEngineTelemetry,
+  funnelSnapshot,
   type RiskEngine,
 } from "./engine/index.js";
+import { strategyPipelines } from "./engine/cycle.js";
 import { createH18Strategy } from "./strategies/h18.js";
 import { createSmcStrategy } from "./strategies/smc.js";
+import { createSmcScalpStrategy } from "./strategies/smc-scalp.js";
 import { CachingMarketDataProvider, HybridMarketDataProvider } from "./data/provider.js";
 import { setEngineStatsProvider } from "./health.js";
 import { monitorEdges } from "./lifecycle/monitor.js";
@@ -376,6 +379,7 @@ async function main() {
       const available: Record<string, () => ReturnType<typeof createH18Strategy>> = {
         H18: () => createH18Strategy(rules.regime),
         SMC: () => createSmcStrategy(rules.regime),
+        SMC_SCALP: () => createSmcScalpStrategy(rules.regime),
       };
       for (const id of rules.engine.strategies) {
         const factory = available[id];
@@ -411,7 +415,10 @@ async function main() {
         equity: rules.engine.equity,
       };
       const engineRuntime = createEngineRuntime();
-      setEngineStatsProvider(getEngineTelemetry);
+      setEngineStatsProvider(() => ({
+        ...getEngineTelemetry(),
+        funnel: funnelSnapshot(strategyPipelines(registry.all())),
+      }));
       logger.info(
         `[boot] engine: enabled · risk=${engineDeps.risk.id} · strategies=[${registry.all().map((s) => s.id).join(",")}]` +
           (registry.all().length === 0 ? " (none registered — cycle idles)" : ""),

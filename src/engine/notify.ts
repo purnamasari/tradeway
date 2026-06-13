@@ -26,6 +26,8 @@ export type NotificationKind =
 export interface NotificationEvent {
   kind: NotificationKind;
   strategyId: string;
+  /** Human-friendly strategy name for the header; falls back to strategyId. */
+  strategyLabel?: string;
   symbol: string;
   side?: Side;
   /** One-line summary after the strategy header, e.g. "LONG BTCUSDT". */
@@ -56,7 +58,7 @@ const KIND_EMOJI: Record<NotificationKind, string> = {
 /** Render an event to plain text. Strategy-agnostic by construction. */
 export function formatNotification(e: NotificationEvent): string {
   const lines: string[] = [];
-  lines.push(`${KIND_EMOJI[e.kind]} Strategy: ${e.strategyId}`);
+  lines.push(`${KIND_EMOJI[e.kind]} Strategy: ${e.strategyLabel ?? e.strategyId}`);
   lines.push(e.headline);
   if (e.reasons.length) {
     lines.push("", "Reason:", ...e.reasons);

@@ -19,15 +19,21 @@ import { emaAdxTrendClassifier } from "../ai/trend-classifier.js";
 import { atr, atrSeries, ema } from "../indicators.js";
 import { logger } from "../logger.js";
 import type { AccountState, StrategyContext } from "./types.js";
-import type { StrategyRegistry } from "./strategy.js";
+import type { StrategyRegistry, Strategy } from "./strategy.js";
 import { createPosition, type Position, type PositionStore } from "./position.js";
 import { applyExitDecision, evaluateBar, evaluateTick, type PositionTransition } from "./exit.js";
 import type { RiskEngine } from "./risk.js";
+import { recommendLeverage } from "./leverage.js";
+import { funnel, funnelSnapshot, renderFunnel } from "./funnel.js";
 import type { NotificationEngine, NotificationEvent } from "./notify.js";
 import { telemetry } from "./telemetry.js";
 
 const BAR_SEC = 900; // decision timeframe: 15m
 const CONTEXT_HEADROOM = 512; // bars beyond minBars for indicator convergence
+
+/** Last rejection stage per (symbol, strategy) — so the debug rejection log
+ *  fires only when the bottleneck CHANGES, not every bar (spam control). */
+const lastRejectStage = new Map<string, string>();
 
 export interface EngineCycleDeps {
   store: PositionStore;
@@ -56,11 +62,12 @@ const fmtPrice = (n: number): string => {
   return Number(n.toFixed(dp)).toString();
 };
 
-function transitionEvents(p: Position, t: PositionTransition): NotificationEvent[] {
+function transitionEvents(p: Position, t: PositionTransition, strategyLabel?: string): NotificationEvent[] {
   const out: NotificationEvent[] = [];
   for (const e of t.events) {
     const base = {
       strategyId: p.strategyId,
+      strategyLabel,
       symbol: p.symbol,
       side: p.side,
       positionId: t.position.id,
@@ -103,34 +110,41 @@ function transitionEvents(p: Position, t: PositionTransition): NotificationEvent
   return out;
 }
 
-async function buildContext(
+/**
+ * Reconstruct the exact decision-time StrategyContext for a symbol. Exported so
+ * the `explain` CLI evaluates against the identical context the live cycle uses
+ * (no divergence). `quiet` suppresses the stale-data warning for ad-hoc use.
+ */
+export async function buildContext(
   symbol: string,
-  deps: EngineCycleDeps,
+  data: MarketDataProvider,
+  rules: Rules,
   depth: number,
   nowSec: number,
+  quiet = false,
 ): Promise<StrategyContext | null> {
-  const candles15m = await deps.data.getCandles(symbol, "15m", depth);
+  const candles15m = await data.getCandles(symbol, "15m", depth);
   if (candles15m.length < 60) return null;
   const last = candles15m[candles15m.length - 1]!;
   // Stale-data guard: refuse to decide on a series whose newest closed bar is
   // older than two intervals (feed outage, backfill lag).
   if (last.time + 2 * BAR_SEC < nowSec - BAR_SEC) {
-    logger.warn(`[engine] ${symbol}: candle data stale (last close ${new Date((last.time + BAR_SEC) * 1000).toISOString()}) — skipping`);
+    if (!quiet) logger.warn(`[engine] ${symbol}: candle data stale (last close ${new Date((last.time + BAR_SEC) * 1000).toISOString()}) — skipping`);
     return null;
   }
-  const candles1h = await deps.data.getCandles(symbol, "1h", 200);
+  const candles1h = await data.getCandles(symbol, "1h", 200);
 
   // Shared market classification — strategies may use or ignore (H18 computes
   // its own research-parity inputs from the raw 15m series).
-  const fullAtr = atrSeries(candles15m, deps.rules.regime.atr_period);
+  const fullAtr = atrSeries(candles15m, rules.regime.atr_period);
   const regime = classifyRegime(
     candles15m.slice(-320),
-    deps.rules.regime,
+    rules.regime,
     fullAtr.slice(-2880).filter(Number.isFinite),
   );
   const closes1h = candles1h.map((c) => c.close);
   const trend = candles1h.length >= 60
-    ? emaAdxTrendClassifier(candles1h, ema(closes1h, deps.rules.regime.ema_fast), ema(closes1h, deps.rules.regime.ema_slow))
+    ? emaAdxTrendClassifier(candles1h, ema(closes1h, rules.regime.ema_fast), ema(closes1h, rules.regime.ema_slow))
     : null;
 
   return {
@@ -142,7 +156,7 @@ async function buildContext(
     regime: regime.regime,
     trend: trend?.trend ?? null,
     atr15: fullAtr[fullAtr.length - 1] ?? null,
-    atr1h: candles1h.length ? atr(candles1h, deps.rules.regime.atr_period) : null,
+    atr1h: candles1h.length ? atr(candles1h, rules.regime.atr_period) : null,
     fundingRate: null,
     openInterest: null,
     extras: {},
@@ -163,7 +177,15 @@ export async function runEngineCycle(deps: EngineCycleDeps, runtime: EngineRunti
       logger.error(`[engine] ${symbol} cycle failed: ${(err as Error).message}`);
     }
   }
+  // Gate-funnel snapshot at debug — the running answer to "which gate is the
+  // bottleneck?" across all symbols this process has seen.
+  logger.debug(`[funnel]\n${renderFunnel(funnelSnapshot(strategyPipelines(strategies)))}`);
   telemetry.cycleDone(performance.now() - started);
+}
+
+/** strategyId → declared stage pipeline (for funnel rendering). */
+export function strategyPipelines(strategies: Strategy[]): Record<string, string[] | undefined> {
+  return Object.fromEntries(strategies.map((s) => [s.id, s.stages]));
 }
 
 async function runSymbol(
@@ -177,7 +199,7 @@ async function runSymbol(
   const open = await deps.store.listOpen({ symbol });
   if (strategies.length === 0 && open.length === 0) return;
 
-  const sctx = await buildContext(symbol, deps, depth, nowSec);
+  const sctx = await buildContext(symbol, deps.data, deps.rules, depth, nowSec);
   if (!sctx) return;
 
   const decisionBar = sctx.candles15m[sctx.candles15m.length - 1]!;
@@ -189,7 +211,8 @@ async function runSymbol(
       const t = evaluateTick(p, sctx.price, Date.now());
       if (t.events.length) {
         await deps.store.update(t.position);
-        for (const e of transitionEvents(p, t)) await deps.notifications.publish(e);
+        const label = deps.registry.get(p.strategyId)?.label;
+        for (const e of transitionEvents(p, t, label)) await deps.notifications.publish(e);
       }
     }
     return;
@@ -199,10 +222,11 @@ async function runSymbol(
 
   // ── Open positions: standing exits → strategy state → strategy exit ───────
   for (let p of open) {
+    const label = deps.registry.get(p.strategyId)?.label;
     const standing = evaluateBar(p, decisionBar, sctx.closeTime * 1000);
     if (standing.position !== p) {
       await deps.store.update(standing.position);
-      for (const e of transitionEvents(p, standing)) await deps.notifications.publish(e);
+      for (const e of transitionEvents(p, standing, label)) await deps.notifications.publish(e);
     }
     p = standing.position;
     if (p.status !== "OPEN") continue;
@@ -219,14 +243,30 @@ async function runSymbol(
 
     const applied = applyExitDecision(p, strategy.evaluateExit(sctx, p), sctx.price, sctx.closeTime * 1000);
     await deps.store.update(applied.position);
-    for (const e of transitionEvents(p, applied)) await deps.notifications.publish(e);
+    for (const e of transitionEvents(p, applied, label)) await deps.notifications.publish(e);
   }
 
   // ── Free slots: entries ────────────────────────────────────────────────────
   for (const strategy of strategies) {
     if (await deps.store.getOpenBySlot(symbol, strategy.id)) continue;
+
+    funnel.evaluated(strategy.id);
     const decision = strategy.evaluateEntry(sctx);
-    if (!decision.enter) continue;
+    if (!decision.enter) {
+      // Preserve the rejection reason: funnel counter (always) + debug log
+      // (throttled to stage changes, so a symbol stuck on "regime" logs once,
+      //  not every bar).
+      funnel.rejected(strategy.id, decision.stage);
+      const key = `${symbol}:${strategy.id}`;
+      const stage = decision.stage ?? "unknown";
+      if (lastRejectStage.get(key) !== stage) {
+        lastRejectStage.set(key, stage);
+        logger.debug(`[explain] ${symbol} ${strategy.id} rejected — stage=${stage} · ${decision.reason}`);
+      }
+      continue;
+    }
+    lastRejectStage.delete(`${symbol}:${strategy.id}`); // setup fired — reset throttle
+    funnel.signal(strategy.id);
     telemetry.signal();
 
     const allOpen = await deps.store.listOpen();
@@ -247,18 +287,32 @@ async function runSymbol(
     position = await deps.store.insert(position);
     telemetry.opened();
     logger.info(`[engine] ${strategy.id} ${symbol} ${position.side} entry intent #${position.id}`);
+
+    // Stop-safe leverage ceiling + R:R, derived from the intent geometry. These
+    // are advisory display fields — the bot never sizes or places orders.
+    const entryMid = (position.entryZone.low + position.entryZone.high) / 2;
+    const lev = recommendLeverage(entryMid, position.stopPrice);
+    const rr = typeof decision.intent.meta?.rr === "number" ? decision.intent.meta.rr : null;
+
     await deps.notifications.publish({
       kind: "entry",
       strategyId: strategy.id,
+      strategyLabel: strategy.label,
       symbol,
       side: position.side,
       positionId: position.id,
       headline: `${position.side} ${symbol}`,
       reasons: decision.intent.reasons,
       fields: [
+        ...(strategy.description ? ([["Style", strategy.description]] as Array<[string, string]>) : []),
+        ["Direction", position.side],
         ["Entry", `${fmtPrice(position.entryZone.low)} – ${fmtPrice(position.entryZone.high)}`],
         ["Stop", fmtPrice(position.stopPrice)],
         ["Target", position.targetPrice != null ? fmtPrice(position.targetPrice) : "trailing"],
+        ...(rr != null ? ([["R:R", `${rr.toFixed(1)}R`]] as Array<[string, string]>) : []),
+        ...(lev
+          ? ([["Max leverage", `${lev.maxLeverage}x (stop ${lev.stopDistPct.toFixed(2)}% away — keeps liquidation beyond your stop)`]] as Array<[string, string]>)
+          : []),
         ...(sized.qty > 0
           ? ([["Size", `${sized.qty.toFixed(4)} (risk ${sized.riskAmount.toFixed(2)})`]] as Array<[string, string]>)
           : []),

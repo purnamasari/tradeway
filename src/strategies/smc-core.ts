@@ -124,10 +124,40 @@ export interface SmcSetup {
   obLevel: number | null; // order-block extreme used for stop refinement
 }
 
+// ── Stage-level rejection (observability) ─────────────────────────────────────
+// The detector is otherwise a black box: every reject collapses to `null`. The
+// staged variant below names WHICH gate stopped a setup, so the engine can log
+// it and build a gate funnel. Trading logic is byte-for-byte unchanged — the
+// staged function computes exactly what detectSide did; only the failure return
+// carries a label now. `detectSmcSetup` stays a thin `.ok ? setup : null`
+// wrapper so research + backtest callers are completely unaffected.
+export type SmcRejectStage = "data" | "bias" | "bos" | "sweep" | "fvg" | "sanity" | "rr";
+
+export type SmcResult =
+  | { ok: true; setup: SmcSetup }
+  | { ok: false; stage: SmcRejectStage; reason: string };
+
+/** Funnel order — how far a setup progressed before it failed. Higher = deeper. */
+const STAGE_RANK: Record<SmcRejectStage, number> = {
+  data: 0,
+  bias: 1,
+  bos: 2,
+  sweep: 3,
+  fvg: 4,
+  sanity: 5,
+  rr: 6,
+};
+
+const reject = (stage: SmcRejectStage, reason: string): SmcResult => ({ ok: false, stage, reason });
+
 /**
  * Detect an SMC setup at the close of bar i. Reads candles[0..i] only.
  * `piv` may be precomputed over the WHOLE series (research): a swept pivot is
  * provably ≤ i − k, so global flags carry no future information at i.
+ *
+ * Backward-compatible wrapper over {@link detectSmcSetupStaged}: identical
+ * return value (`SmcSetup | null`) so existing research/backtest callers are
+ * untouched.
  */
 export function detectSmcSetup(
   candles: Candle[],
@@ -136,8 +166,31 @@ export function detectSmcSetup(
   p: SmcParams,
   piv: PivotFlags = computePivots(candles, p.pivotK),
 ): SmcSetup | null {
-  if (i < p.pivotK + 2 || !Number.isFinite(atr15) || atr15 <= 0) return null;
-  return detectSide(candles, i, atr15, p, piv, "long") ?? detectSide(candles, i, atr15, p, piv, "short");
+  const r = detectSmcSetupStaged(candles, i, atr15, p, piv);
+  return r.ok ? r.setup : null;
+}
+
+/**
+ * Stage-aware detection. Same computation as {@link detectSmcSetup}; on failure
+ * returns the gate that stopped it. When both directions fail, reports the side
+ * that progressed FURTHEST (the most informative explanation).
+ */
+export function detectSmcSetupStaged(
+  candles: Candle[],
+  i: number,
+  atr15: number,
+  p: SmcParams,
+  piv: PivotFlags = computePivots(candles, p.pivotK),
+): SmcResult {
+  if (i < p.pivotK + 2 || !Number.isFinite(atr15) || atr15 <= 0) {
+    return reject("data", "insufficient bars or ATR unavailable");
+  }
+  const long = detectSide(candles, i, atr15, p, piv, "long");
+  if (long.ok) return long;
+  const short = detectSide(candles, i, atr15, p, piv, "short");
+  if (short.ok) return short;
+  // Both sides failed — surface whichever reached the deeper gate.
+  return STAGE_RANK[short.stage] > STAGE_RANK[long.stage] ? short : long;
 }
 
 function detectSide(
@@ -147,7 +200,7 @@ function detectSide(
   p: SmcParams,
   piv: PivotFlags,
   dir: Direction,
-): SmcSetup | null {
+): SmcResult {
   const long = dir === "long";
   const k = p.pivotK;
   const lo0 = Math.max(0, i - p.liqLookbackBars);
@@ -155,9 +208,9 @@ function detectSide(
 
   // ── 0. Higher-timeframe bias gate (optional) ───────────────────────────────
   if (p.biasBars > 0) {
-    if (i < p.biasBars) return null;
+    if (i < p.biasBars) return reject("bias", "insufficient bars for bias window");
     const r = close / c[i - p.biasBars]!.close - 1;
-    if (long ? r <= 0 : r >= 0) return null;
+    if (long ? r <= 0 : r >= 0) return reject("bias", "higher-timeframe bias disagrees with direction");
   }
 
   // ── 2. BOS gate first (cheapest, rarest) ──────────────────────────────────
@@ -170,10 +223,10 @@ function detectSide(
       break;
     }
   }
-  if (!Number.isFinite(bosLevel)) return null;
+  if (!Number.isFinite(bosLevel)) return reject("bos", "no opposing swing pivot to break");
   const broke = long ? close > bosLevel : close < bosLevel;
   const prevInside = long ? c[i - 1]!.close <= bosLevel : c[i - 1]!.close >= bosLevel;
-  if (!broke || !prevInside) return null;
+  if (!broke || !prevInside) return reject("bos", "no fresh break of structure (not first close beyond swing)");
 
   // ── 1. Liquidity sweep within the last sweepWindow bars ───────────────────
   // Walk back from each candidate raid bar t tracking the running extreme;
@@ -203,13 +256,15 @@ function detectSide(
     }
     if (Number.isFinite(sweptLevel)) sweepT = t;
   }
-  if (sweepT === -1) return null;
+  if (sweepT === -1) return reject("sweep", "no liquidity sweep of an intact pool in window");
 
   // Reclaim must HOLD: every close from the sweep bar to the decision bar
   // stays on the reclaimed side (wicks below are re-raids and are tolerated).
   let sweepExtreme = long ? Infinity : -Infinity;
   for (let m = sweepT; m <= i; m++) {
-    if (long ? c[m]!.close <= sweptLevel : c[m]!.close >= sweptLevel) return null;
+    if (long ? c[m]!.close <= sweptLevel : c[m]!.close >= sweptLevel) {
+      return reject("sweep", "sweep reclaim did not hold (close back through level)");
+    }
     sweepExtreme = long ? Math.min(sweepExtreme, c[m]!.low) : Math.max(sweepExtreme, c[m]!.high);
   }
 
@@ -240,7 +295,7 @@ function detectSide(
     zoneHigh = zHigh;
     break; // most recent unfilled gap in the leg
   }
-  if (fvgIdx === -1) return null;
+  if (fvgIdx === -1) return reject("fvg", "no unfilled displacement gap ≥ threshold");
 
   // Entry zone: either the FVG itself (limit retrace) or a tight band around
   // the BOS close (market-style; the FVG remains displacement evidence).
@@ -272,7 +327,9 @@ function detectSide(
   const sl = long ? stopAnchor - p.slBufAtr * atr15 : stopAnchor + p.slBufAtr * atr15;
   const risk = long ? entryMid - sl : sl - entryMid;
   // Structural sanity: the stop must clear the entry zone entirely.
-  if (risk <= 0 || (long ? sl >= zoneLow : sl <= zoneHigh)) return null;
+  if (risk <= 0 || (long ? sl >= zoneLow : sl <= zoneHigh)) {
+    return reject("sanity", "stop does not clear the entry zone");
+  }
 
   // Target: nearest UNTAPPED opposing liquidity pool beyond the current bar's
   // extreme (untapped pools form a staircase walking back, so the first one
@@ -295,7 +352,7 @@ function detectSide(
   let rr: number;
   if (Number.isFinite(tpLiq)) {
     rr = (long ? tpLiq - entryMid : entryMid - tpLiq) / risk;
-    if (rr < p.minRR) return null; // pool too close — reward not worth the risk
+    if (rr < p.minRR) return reject("rr", "reward:risk below minimum (pool too close)");
     rr = Math.min(rr, p.maxRR);
     tp = long ? Math.min(tpLiq, entryMid + p.maxRR * risk) : Math.max(tpLiq, entryMid - p.maxRR * risk);
   } else {
@@ -303,5 +360,5 @@ function detectSide(
     tp = long ? entryMid + SMC_DEFAULT_RR * risk : entryMid - SMC_DEFAULT_RR * risk;
   }
 
-  return { direction: dir, zoneLow, zoneHigh, sl, tp, rr, sweptLevel, sweepExtreme, bosLevel, obLevel };
+  return { ok: true, setup: { direction: dir, zoneLow, zoneHigh, sl, tp, rr, sweptLevel, sweepExtreme, bosLevel, obLevel } };
 }

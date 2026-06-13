@@ -19,7 +19,9 @@ import {
   fetchOIHistoryRange,
 } from "../data/bybit.js";
 import { simulateOutcome, type SimCosts, type SimStatus } from "./simulate.js";
-import { createH18Strategy, H18_CONTEXT_BARS } from "../strategies/h18.js";
+import { createH18Strategy } from "../strategies/h18.js";
+import { createSmcStrategy } from "../strategies/smc.js";
+import { createSmcScalpStrategy } from "../strategies/smc-scalp.js";
 import { createPosition, evaluateBar, applyExitDecision } from "../engine/index.js";
 import type { Position, StrategyContext, Strategy } from "../engine/index.js";
 import { StrategyRegistry } from "../engine/strategy.js";
@@ -116,6 +118,8 @@ function combined(s: Signal): number {
 function getBacktestRegistry(rules: Rules): StrategyRegistry {
   const registry = new StrategyRegistry();
   registry.register(createH18Strategy(rules.regime));
+  registry.register(createSmcStrategy(rules.regime));
+  registry.register(createSmcScalpStrategy(rules.regime));
   return registry;
 }
 
@@ -144,7 +148,7 @@ export function replayPluginSymbol(
     const bar = candles[i]!;
     const closeMs = (bar.time + 900) * 1000;
     
-    const contextBars = strategy.id === "H18" ? H18_CONTEXT_BARS : (strategy.minBars + 512);
+    const contextBars = strategy.minBars + 511;
     const sctx: StrategyContext = {
       symbol,
       closeTime: bar.time + 900,
