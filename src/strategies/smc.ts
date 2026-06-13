@@ -24,7 +24,7 @@ import type { Regime } from "../types.js";
 import type { Rules } from "../config.js";
 import { classifyRegime } from "../regime/engine.js";
 import { atrSeries } from "../indicators.js";
-import { detectSmcSetup, SMC_CANONICAL } from "./smc-core.js";
+import { detectSmcSetupStaged, SMC_CANONICAL } from "./smc-core.js";
 import type { Strategy, StrategyContext, EntryDecision, ExitDecision, PositionState } from "../engine/index.js";
 import { entry, noEntry, hold } from "../engine/index.js";
 import type { Position } from "../engine/index.js";
@@ -48,16 +48,19 @@ export function createSmcStrategy(regimeRules: Rules["regime"]): Strategy {
   const p = SMC_CANONICAL;
   return {
     id: "SMC",
+    label: "SMC",
+    description: "15m liquidity sweep-reversal, daytrader cadence (hours–2 days)",
     minBars: SMC_MIN_BARS,
+    stages: ["data", "regime", "bias", "bos", "sweep", "fvg", "sanity", "rr"],
 
     evaluateEntry(ctx: StrategyContext): EntryDecision {
       const c15 = ctx.candles15m;
-      if (c15.length < SMC_MIN_BARS) return noEntry(`needs ${SMC_MIN_BARS} closed 15m bars`);
+      if (c15.length < SMC_MIN_BARS) return noEntry(`needs ${SMC_MIN_BARS} closed 15m bars`, "data");
 
       const i = c15.length - 1;
       const fullAtr = atrSeries(c15, regimeRules.atr_period);
       const atr15 = fullAtr[i]!;
-      if (!Number.isFinite(atr15) || atr15 <= 0) return noEntry("ATR(15m) unavailable");
+      if (!Number.isFinite(atr15) || atr15 <= 0) return noEntry("ATR(15m) unavailable", "data");
 
       // Regime gate — research-identical inputs (window 320, trailing-30d ATR
       // percentile), same construction as the H18 plug-in. Sweep-reversals
@@ -67,11 +70,12 @@ export function createSmcStrategy(regimeRules: Rules["regime"]): Strategy {
       const atrHist = fullAtr.slice(-30 * DAY_BARS).filter(Number.isFinite);
       const regime: Regime = classifyRegime(c15.slice(-320), regimeRules, atrHist).regime;
       if (regime !== "ranging" && regime !== "high_volatility") {
-        return noEntry(`regime ${regime} — sweep-reversal entries need ranging/high_volatility`);
+        return noEntry(`regime ${regime} — sweep-reversal entries need ranging/high_volatility`, "regime");
       }
 
-      const setup = detectSmcSetup(c15, i, atr15, p);
-      if (!setup) return noEntry("no sweep→BOS→FVG confluence");
+      const res = detectSmcSetupStaged(c15, i, atr15, p);
+      if (!res.ok) return noEntry(res.reason, res.stage);
+      const setup = res.setup;
 
       const long = setup.direction === "long";
       const entryMid = (setup.zoneLow + setup.zoneHigh) / 2;

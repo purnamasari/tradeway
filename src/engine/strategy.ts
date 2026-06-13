@@ -7,6 +7,19 @@ export interface Strategy {
   /** Stable identifier; appears in position rows, notifications, analytics. */
   id: string;
 
+  /** Human-friendly name for notifications (e.g. "SMC Scalp"). Falls back to
+   *  `id` when absent. Display-only — never used for routing. */
+  label?: string;
+
+  /** One-line style descriptor shown on the entry alert (e.g. timeframe,
+   *  cadence, hold horizon). Display-only. */
+  description?: string;
+
+  /** Ordered gate pipeline (shallowest → deepest), matching the `stage` values
+   *  this strategy returns on rejection. Lets the gate funnel render cumulative
+   *  pass-through counts. Display/metrics only; omit for an unstaged strategy. */
+  stages?: string[];
+
   /** Closed 15m bars of history required before evaluateEntry can decide.
    *  The cycle sizes its MarketDataProvider request from the registry max. */
   minBars: number;

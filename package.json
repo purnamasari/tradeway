@@ -12,6 +12,7 @@
     "fetch:history": "tsx src/cli/fetch-history.ts",
     "verify:history": "tsx src/cli/verify-history.ts",
     "engine:compare": "tsx src/cli/engine-compare.ts",
+    "explain": "tsx src/cli/explain.ts",
     "test:h18:replay": "tsx research/validation/replay-h18.ts",
     "test:smc:replay": "tsx research/validation/replay-smc.ts",
     "analytics": "tsx src/index.ts --analytics",

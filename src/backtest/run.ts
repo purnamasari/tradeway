@@ -27,7 +27,7 @@ async function main() {
   const slippagePct = Number(arg("slippage_pct", "0.02"));
 
   const strategy = arg("strategy", "legacy");
-  const warmupDays = strategy === "H18" ? 30 : 3;
+  const warmupDays = (strategy === "H18" || strategy === "SMC" || strategy === "SMC_SCALP") ? 30 : 3;
 
   const enabled = watchlist.assets.filter((a) => a.enabled);
   const symList = (arg("symbols", "") || enabled.map((a) => a.symbol).join(",")).split(",").filter(Boolean);

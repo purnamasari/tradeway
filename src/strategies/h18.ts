@@ -82,21 +82,24 @@ function aggregate1h(c15: Candle[]): Candle[] {
 export function createH18Strategy(regimeRules: Rules["regime"]): Strategy {
   return {
     id: "H18",
+    label: "H18 Trend",
+    description: "15m Donchian breakout + trend trail, swing cadence (multi-day)",
     minBars: H18_MIN_BARS,
+    stages: ["data", "regime", "channel", "momentum"],
 
     evaluateEntry(ctx: StrategyContext): EntryDecision {
       const c15 = ctx.candles15m;
-      if (c15.length < H18_MIN_BARS) return noEntry(`needs ${H18_MIN_BARS} closed 15m bars`);
+      if (c15.length < H18_MIN_BARS) return noEntry(`needs ${H18_MIN_BARS} closed 15m bars`, "data");
 
       // Regime gate — research-identical inputs (window 320, trailing-30d ATR
       // percentile from atrSeries of the available series).
       const fullAtr = atrSeries(c15, regimeRules.atr_period);
       const atrHist = fullAtr.slice(-30 * DAY_BARS).filter(Number.isFinite);
       const regime: Regime = classifyRegime(c15.slice(-320), regimeRules, atrHist).regime;
-      if (regime === "ranging") return noEntry("regime ranging — breakout entries blocked");
+      if (regime === "ranging") return noEntry("regime ranging — breakout entries blocked", "regime");
 
       const atr1h = atr(aggregate1h(c15).slice(-120), 14);
-      if (!Number.isFinite(atr1h) || atr1h <= 0) return noEntry("ATR(1h) unavailable");
+      if (!Number.isFinite(atr1h) || atr1h <= 0) return noEntry("ATR(1h) unavailable", "data");
       const atr15 = fullAtr[fullAtr.length - 1]!;
       const close = c15[c15.length - 1]!.close;
 
@@ -110,7 +113,7 @@ export function createH18Strategy(regimeRules: Rules["regime"]): Strategy {
       }
       const breakUp = close > hi;
       const breakDn = close < lo;
-      if (!breakUp && !breakDn) return noEntry("no 7d channel break");
+      if (!breakUp && !breakDn) return noEntry("no 7d channel break", "channel");
 
       const r = close / c15[c15.length - 1 - H18_PARAMS.momentumBars]!.close - 1;
       const state: H18State = { anchorClose: null, trailDist: H18_PARAMS.trailAtrMult * atr1h };
@@ -150,6 +153,7 @@ export function createH18Strategy(regimeRules: Rules["regime"]): Strategy {
       }
       return noEntry(
         breakUp ? `breakout without momentum (r30 ${(r * 100).toFixed(1)}% < 5%)` : `breakdown without momentum (r30 ${(r * 100).toFixed(1)}% > -5%)`,
+        "momentum",
       );
     },
 
