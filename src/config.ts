@@ -151,6 +151,9 @@ export interface Rules {
     min_oi: number;
     min_volume: number;
     min_candles: number;
+    sr: {
+      weekly_lookback: number; // fractal lookback for the structural (weekly) S/R tier
+    };
   };
   // Strategy-agnostic execution engine (src/engine/, MIGRATION_PLAN.md).
   // Runs alongside the legacy signal path; engine positions are source='engine'.
@@ -246,6 +249,10 @@ const RISK_DEFAULTS: Rules["risk"] = {
   max_sl_pct: 5.0,
 };
 
+const BACKFILL_SR_DEFAULTS: Rules["backfill"]["sr"] = {
+  weekly_lookback: 2,
+};
+
 const MOMENTUM_DEFAULTS: Rules["momentum"] = {
   enabled: true,
   lookback_1m: 7,
@@ -292,6 +299,7 @@ export function loadRules(): Rules {
       ...(rules.management?.health_weights ?? {}),
     },
   };
+  rules.backfill.sr = { ...BACKFILL_SR_DEFAULTS, ...(rules.backfill?.sr ?? {}) };
   return rules;
 }
 

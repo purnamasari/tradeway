@@ -293,6 +293,7 @@ export async function buildMockContext(
     candles1m,
     candles15m,
     candles1h,
+    candles1w: [],
     fundingRate,
     openInterest,
     fundingHistory,
